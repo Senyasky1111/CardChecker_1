@@ -1,0 +1,63 @@
+# Data (large files)
+data/
+models/
+
+# Dataset zips
+*.zip
+
+# Debug images
+_debug_*
+_test_*
+_url_pattern.py
+nul
+
+# Static generated files (detection results)
+static/detect_*
+static/e2e_tests/
+static/test_*.jpg
+
+# Private utility scripts
+scripts/_*
+scripts/run_gemini_test.py
+scripts/test_gemini.py
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+venv/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+.cursor/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Env
+.env
+
+# Extracted archive
+__extracted/
+
+# Pytest
+.pytest_cache/
+
+# YOLO training runs
+runs/
+
+# Test outputs
+output/
+test_result.json
+
+# Mobile app (separate repo)
+mobile/
+
+# Claude settings
+.claude/

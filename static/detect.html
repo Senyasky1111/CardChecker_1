@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Card Number Detector</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0f0f23; color: #e0e0e0; min-height: 100vh; }
+  .container { max-width: 900px; margin: 0 auto; padding: 20px; }
+  h1 { text-align: center; color: #ffcc00; font-size: 1.6rem; margin: 20px 0 8px; }
+  .subtitle { text-align: center; color: #888; font-size: 0.9rem; margin-bottom: 20px; }
+
+  .upload-area {
+    border: 2px dashed #444; border-radius: 16px; padding: 40px; text-align: center;
+    margin: 20px 0; cursor: pointer; transition: border-color 0.3s; background: #1a1a2e;
+  }
+  .upload-area:hover { border-color: #ffcc00; }
+  .upload-area.dragover { border-color: #ffcc00; background: #1a1a3e; }
+
+  .btn {
+    display: inline-block; padding: 12px 24px; border: none; border-radius: 8px;
+    font-size: 1rem; cursor: pointer; margin: 8px; font-weight: 600;
+    transition: transform 0.1s, opacity 0.2s;
+  }
+  .btn:hover { transform: scale(1.02); }
+  .btn:active { transform: scale(0.98); }
+  .btn-primary { background: #ffcc00; color: #1a1a2e; }
+  .btn-secondary { background: #333; color: #e0e0e0; }
+  .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+  #preview { max-width: 300px; max-height: 400px; border-radius: 12px; margin: 16px auto; display: none; }
+  #fileInput { display: none; }
+
+  .result-box {
+    background: #1a1a2e; border-radius: 16px; padding: 32px; margin: 24px 0;
+    text-align: center; display: none;
+  }
+  .result-box.visible { display: block; }
+  .result-number {
+    font-size: 4rem; font-weight: bold; color: #ffcc00; margin: 16px 0;
+    font-family: 'Courier New', monospace;
+  }
+  .result-number.fail { color: #ff4444; font-size: 2rem; }
+  .result-meta { color: #888; font-size: 0.9rem; margin-top: 8px; }
+  .result-meta span { margin: 0 12px; }
+  .set-code { color: #64b5f6; font-weight: bold; }
+
+  .debug-section {
+    background: #111; border-radius: 8px; padding: 16px; margin-top: 20px;
+    text-align: left; font-family: monospace; font-size: 0.8rem;
+    max-height: 300px; overflow-y: auto; display: none;
+  }
+  .debug-section.visible { display: block; }
+  .debug-band { margin: 8px 0; padding: 8px; background: #1a1a2e; border-radius: 4px; }
+  .debug-band .band-label { color: #ffcc00; font-weight: bold; }
+  .debug-band .ocr-text { color: #4caf50; }
+
+  .spinner { display: none; text-align: center; margin: 20px 0; }
+  .spinner.active { display: block; }
+  .spinner::after {
+    content: ''; display: inline-block; width: 32px; height: 32px;
+    border: 3px solid #333; border-top-color: #ffcc00; border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .error { color: #ff4444; text-align: center; margin: 16px 0; }
+  .timing { color: #666; font-size: 0.8rem; text-align: center; margin-top: 8px; }
+
+  .toggle-debug {
+    background: none; border: 1px solid #444; color: #888; padding: 6px 16px;
+    border-radius: 4px; cursor: pointer; font-size: 0.8rem; margin-top: 12px;
+  }
+  .toggle-debug:hover { border-color: #888; color: #e0e0e0; }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>Card Number Detector</h1>
+  <p class="subtitle">Upload a Pokemon card image to detect its collector number (e.g. 45/120)</p>
+
+  <div class="upload-area" id="dropZone">
+    <p style="font-size: 1.1rem; margin-bottom: 16px;">Drop a card photo here or click to upload</p>
+    <button class="btn btn-primary" onclick="document.getElementById('fileInput').click()">
+      Upload Photo
+    </button>
+    <input type="file" id="fileInput" accept="image/*">
+  </div>
+
+  <img id="preview" alt="Card preview">
+
+  <div style="text-align: center;">
+    <button class="btn btn-primary" id="detectBtn" onclick="detect()" disabled>
+      Detect Number
+    </button>
+  </div>
+
+  <div class="spinner" id="spinner"></div>
+  <div class="error" id="error"></div>
+
+  <div class="result-box" id="resultBox">
+    <div style="color: #888; font-size: 0.9rem;">Detected number:</div>
+    <div class="result-number" id="resultNumber"></div>
+    <div class="result-meta" id="resultMeta"></div>
+    <button class="toggle-debug" id="toggleDebug" onclick="toggleDebug()">Show debug info</button>
+    <div class="debug-section" id="debugSection"></div>
+  </div>
+
+  <div class="timing" id="timing"></div>
+</div>
+
+<script>
+const API = window.location.origin;
+let selectedFile = null;
+
+document.getElementById('fileInput').addEventListener('change', (e) => {
+  if (e.target.files.length > 0) handleFile(e.target.files[0]);
+});
+
+const dropZone = document.getElementById('dropZone');
+dropZone.addEventListener('dragover', (e) => { e.preventDefault(); dropZone.classList.add('dragover'); });
+dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragover'));
+dropZone.addEventListener('drop', (e) => {
+  e.preventDefault(); dropZone.classList.remove('dragover');
+  if (e.dataTransfer.files.length > 0) handleFile(e.dataTransfer.files[0]);
+});
+
+function handleFile(file) {
+  selectedFile = file;
+  const preview = document.getElementById('preview');
+  preview.src = URL.createObjectURL(file);
+  preview.style.display = 'block';
+  document.getElementById('detectBtn').disabled = false;
+  document.getElementById('resultBox').classList.remove('visible');
+  document.getElementById('error').textContent = '';
+  document.getElementById('timing').textContent = '';
+}
+
+async function detect() {
+  if (!selectedFile) return;
+
+  const btn = document.getElementById('detectBtn');
+  const spinner = document.getElementById('spinner');
+  const errorEl = document.getElementById('error');
+  const resultBox = document.getElementById('resultBox');
+  const resultNumber = document.getElementById('resultNumber');
+  const resultMeta = document.getElementById('resultMeta');
+  const timingEl = document.getElementById('timing');
+  const debugSection = document.getElementById('debugSection');
+
+  btn.disabled = true;
+  spinner.classList.add('active');
+  errorEl.textContent = '';
+  resultBox.classList.remove('visible');
+  debugSection.classList.remove('visible');
+  timingEl.textContent = '';
+
+  try {
+    const formData = new FormData();
+    formData.append('file', selectedFile);
+
+    const resp = await fetch(`${API}/detect-number?debug=true`, {
+      method: 'POST',
+      body: formData,
+    });
+    const data = await resp.json();
+
+    timingEl.textContent = `${data.processing_time_ms.toFixed(0)}ms`;
+
+    resultBox.classList.add('visible');
+
+    if (data.success) {
+      resultNumber.textContent = data.number;
+      resultNumber.className = 'result-number';
+
+      let meta = [];
+      if (data.set_code) meta.push(`<span>Set: <span class="set-code">${data.set_code}</span></span>`);
+      meta.push(`<span>Confidence: ${(data.confidence * 100).toFixed(1)}%</span>`);
+      if (data.raw_ocr) meta.push(`<span>Raw: "${data.raw_ocr}"</span>`);
+      resultMeta.innerHTML = meta.join('');
+    } else {
+      resultNumber.textContent = 'Not detected';
+      resultNumber.className = 'result-number fail';
+      resultMeta.innerHTML = '<span>Could not find a collector number pattern (N/N) on this card</span>';
+    }
+
+    // Debug info
+    if (data.debug) {
+      let html = `<div style="color:#888; margin-bottom:8px;">Card detected: ${data.debug.card_detected ? 'Yes' : 'No (full image used)'}</div>`;
+      for (const band of data.debug.bands) {
+        html += `<div class="debug-band">
+          <div class="band-label">Band ${band.band} (y: ${(band.region.y_start*100).toFixed(0)}-${(band.region.y_end*100).toFixed(0)}%)</div>
+          <div>Texts: ${band.texts.map(t => `<span class="ocr-text">"${t[0]}"</span> (${(t[1]*100).toFixed(0)}%)`).join(', ') || '<em>none</em>'}</div>
+          <div>Joined: "${band.joined}"</div>
+        </div>`;
+      }
+      debugSection.innerHTML = html;
+    }
+  } catch (err) {
+    errorEl.textContent = `Error: ${err.message}`;
+  } finally {
+    btn.disabled = false;
+    spinner.classList.remove('active');
+  }
+}
+
+function toggleDebug() {
+  const section = document.getElementById('debugSection');
+  const btn = document.getElementById('toggleDebug');
+  section.classList.toggle('visible');
+  btn.textContent = section.classList.contains('visible') ? 'Hide debug info' : 'Show debug info';
+}
+</script>
+</body>
+</html>

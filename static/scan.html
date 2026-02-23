@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Card Scanner</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0f0f23; color: #e0e0e0; min-height: 100vh; }
+  .container { max-width: 1000px; margin: 0 auto; padding: 20px; }
+  h1 { text-align: center; color: #ffcc00; font-size: 1.6rem; margin: 20px 0 8px; }
+  .subtitle { text-align: center; color: #888; font-size: 0.9rem; margin-bottom: 20px; }
+
+  .upload-area {
+    border: 2px dashed #444; border-radius: 16px; padding: 40px; text-align: center;
+    margin: 20px 0; cursor: pointer; transition: border-color 0.3s; background: #1a1a2e;
+  }
+  .upload-area:hover { border-color: #ffcc00; }
+  .upload-area.dragover { border-color: #ffcc00; background: #1a1a3e; }
+
+  .btn {
+    display: inline-block; padding: 12px 24px; border: none; border-radius: 8px;
+    font-size: 1rem; cursor: pointer; margin: 8px; font-weight: 600;
+    transition: transform 0.1s, opacity 0.2s;
+  }
+  .btn:hover { transform: scale(1.02); }
+  .btn:active { transform: scale(0.98); }
+  .btn-primary { background: #ffcc00; color: #1a1a2e; }
+  .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+  #preview { max-width: 300px; max-height: 400px; border-radius: 12px; margin: 16px auto; display: none; }
+  #fileInput { display: none; }
+
+  .result-box {
+    background: #1a1a2e; border-radius: 16px; padding: 24px; margin: 24px 0; display: none;
+  }
+  .result-box.visible { display: block; }
+
+  .card-result {
+    display: flex; gap: 24px; align-items: flex-start;
+  }
+  .card-image { max-width: 180px; border-radius: 8px; }
+  .card-info { flex: 1; }
+  .card-name { font-size: 1.5rem; font-weight: bold; color: #ffcc00; margin-bottom: 8px; }
+  .card-set { color: #64b5f6; font-size: 1rem; margin-bottom: 4px; }
+  .card-number { color: #aaa; font-size: 0.95rem; margin-bottom: 12px; }
+  .card-rarity { color: #ab47bc; font-size: 0.9rem; margin-bottom: 12px; }
+
+  .prices {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(100px, 1fr));
+    gap: 8px; margin: 16px 0;
+  }
+  .price-box {
+    background: #111; border-radius: 8px; padding: 12px; text-align: center;
+  }
+  .price-label { color: #888; font-size: 0.75rem; text-transform: uppercase; margin-bottom: 4px; }
+  .price-value { font-size: 1.2rem; font-weight: bold; color: #4caf50; }
+  .price-value.foil { color: #ff9800; }
+
+  .match-meta {
+    margin-top: 16px; padding-top: 12px; border-top: 1px solid #333;
+    color: #666; font-size: 0.8rem;
+  }
+  .match-meta span { margin-right: 16px; }
+  .method-tag {
+    display: inline-block; padding: 2px 8px; border-radius: 4px;
+    font-size: 0.75rem; font-weight: bold; text-transform: uppercase;
+  }
+  .method-tag.ocr_exact { background: #1b5e20; color: #4caf50; }
+  .method-tag.ocr_name { background: #0d47a1; color: #42a5f5; }
+  .method-tag.ocr_number { background: #e65100; color: #ff9800; }
+  .method-tag.clip_only { background: #4a148c; color: #ce93d8; }
+
+  .alternatives {
+    margin-top: 16px; padding-top: 12px; border-top: 1px solid #333;
+  }
+  .alternatives h3 { color: #888; font-size: 0.9rem; margin-bottom: 8px; }
+  .alt-card {
+    display: flex; gap: 12px; padding: 8px; background: #111; border-radius: 8px; margin: 4px 0;
+    align-items: center;
+  }
+  .alt-card .alt-name { color: #e0e0e0; flex: 1; }
+  .alt-card .alt-set { color: #64b5f6; font-size: 0.85rem; }
+  .alt-card .alt-price { color: #4caf50; font-weight: bold; }
+
+  .cm-link {
+    display: inline-block; margin-top: 12px; padding: 8px 16px;
+    background: #1565c0; color: white; border-radius: 8px; text-decoration: none;
+    font-size: 0.9rem;
+  }
+  .cm-link:hover { background: #1976d2; }
+
+  .ocr-info {
+    background: #111; border-radius: 8px; padding: 12px; margin-bottom: 16px;
+    font-family: monospace; font-size: 0.85rem;
+  }
+  .ocr-info span { margin-right: 20px; }
+  .ocr-label { color: #888; }
+  .ocr-value { color: #ffcc00; }
+
+  .spinner { display: none; text-align: center; margin: 20px 0; }
+  .spinner.active { display: block; }
+  .spinner::after {
+    content: ''; display: inline-block; width: 32px; height: 32px;
+    border: 3px solid #333; border-top-color: #ffcc00; border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .error { color: #ff4444; text-align: center; margin: 16px 0; }
+  .fail-box { text-align: center; padding: 32px; }
+  .fail-box .fail-icon { font-size: 3rem; margin-bottom: 12px; }
+  .fail-box .fail-text { color: #ff4444; font-size: 1.2rem; }
+  .fail-box .fail-hint { color: #888; font-size: 0.9rem; margin-top: 8px; }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>Card Scanner</h1>
+  <p class="subtitle">Upload a Pokemon card photo &rarr; OCR reads name/number &rarr; instant SQL lookup with prices</p>
+
+  <div class="upload-area" id="dropZone">
+    <p style="font-size: 1.1rem; margin-bottom: 16px;">Drop a card photo here or click to upload</p>
+    <button class="btn btn-primary" onclick="document.getElementById('fileInput').click()">Upload Photo</button>
+    <input type="file" id="fileInput" accept="image/*">
+  </div>
+
+  <div style="text-align: center;">
+    <img id="preview" alt="Card preview">
+  </div>
+
+  <div style="text-align: center;">
+    <button class="btn btn-primary" id="scanBtn" onclick="scan()" disabled>Scan Card</button>
+  </div>
+
+  <div class="spinner" id="spinner"></div>
+  <div class="error" id="error"></div>
+
+  <div class="result-box" id="resultBox"></div>
+</div>
+
+<script>
+const API = window.location.origin;
+let selectedFile = null;
+
+document.getElementById('fileInput').addEventListener('change', (e) => {
+  if (e.target.files.length > 0) handleFile(e.target.files[0]);
+});
+
+const dropZone = document.getElementById('dropZone');
+dropZone.addEventListener('dragover', (e) => { e.preventDefault(); dropZone.classList.add('dragover'); });
+dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragover'));
+dropZone.addEventListener('drop', (e) => {
+  e.preventDefault(); dropZone.classList.remove('dragover');
+  if (e.dataTransfer.files.length > 0) handleFile(e.dataTransfer.files[0]);
+});
+
+function handleFile(file) {
+  selectedFile = file;
+  const preview = document.getElementById('preview');
+  preview.src = URL.createObjectURL(file);
+  preview.style.display = 'block';
+  document.getElementById('scanBtn').disabled = false;
+  document.getElementById('resultBox').classList.remove('visible');
+  document.getElementById('error').textContent = '';
+}
+
+function fmtPrice(val) {
+  if (val === null || val === undefined) return '-';
+  return '\u20AC' + val.toFixed(2);
+}
+
+async function scan() {
+  if (!selectedFile) return;
+
+  const btn = document.getElementById('scanBtn');
+  const spinner = document.getElementById('spinner');
+  const errorEl = document.getElementById('error');
+  const resultBox = document.getElementById('resultBox');
+
+  btn.disabled = true;
+  spinner.classList.add('active');
+  errorEl.textContent = '';
+  resultBox.classList.remove('visible');
+
+  try {
+    const formData = new FormData();
+    formData.append('file', selectedFile);
+
+    const resp = await fetch(`${API}/identify-v2`, { method: 'POST', body: formData });
+    if (!resp.ok) {
+      const errText = await resp.text();
+      throw new Error(`Server error (${resp.status}): ${errText.substring(0, 200)}`);
+    }
+    const data = await resp.json();
+
+    resultBox.classList.add('visible');
+
+    if (!data.success) {
+      resultBox.innerHTML = `
+        <div class="fail-box">
+          <div class="fail-text">Could not identify card</div>
+          <div class="fail-hint">
+            ${data.ocr_name ? 'OCR read name: "' + data.ocr_name + '"' : 'Name not detected.'}
+            ${data.ocr_number ? ' | Number: ' + data.ocr_number : ' | Number not detected.'}
+            <br>Make sure the card fills most of the photo and text is readable.
+          </div>
+        </div>`;
+      return;
+    }
+
+    const card = data.top_match;
+    // TCGdex EN images need /high.webp suffix; JP/TW images are already full URLs
+    let imgSrc = '';
+    if (card.image_url) {
+      if (card.image_url.includes('assets.tcgdex.net')) {
+        imgSrc = card.image_url + '/high.webp';
+      } else {
+        imgSrc = card.image_url;
+      }
+    }
+
+    let html = '';
+
+    // Language flags
+    const langFlags = {'en': 'EN', 'ja': 'JP', 'zh-tw': 'TW', 'zh-cn': 'CN'};
+    const langFlag = langFlags[data.detected_language] || data.detected_language;
+
+    // OCR info
+    html += `<div class="ocr-info">
+      <span class="ocr-label">OCR Name:</span> <span class="ocr-value">${data.ocr_name || '-'}</span>
+      <span class="ocr-label">Number:</span> <span class="ocr-value">${data.ocr_number || '-'}</span>
+      <span class="ocr-label">Lang:</span> <span class="ocr-value">${langFlag}</span>
+      <span class="ocr-label">Time:</span> <span class="ocr-value">${data.processing_time_ms.toFixed(0)}ms</span>
+    </div>`;
+
+    // Main card
+    html += `<div class="card-result">`;
+    if (imgSrc) {
+      html += `<img class="card-image" src="${imgSrc}" alt="${card.name}" onerror="this.style.display='none'">`;
+    }
+    // Display name: eng_name if available, otherwise name
+    const displayName = card.eng_name && card.eng_name !== card.name ? card.eng_name : card.name;
+    const showOriginal = card.eng_name && card.eng_name !== card.name;
+    const cardLang = langFlags[card.language] || card.language;
+    const numberDisplay = card.set_total ? `#${card.collector_number}/${card.set_total}` : `#${card.collector_number || '?'}`;
+
+    html += `<div class="card-info">
+      <div class="card-name">${displayName} <span style="font-size:0.8rem;color:#888;">[${cardLang}]</span></div>
+      ${showOriginal ? '<div style="color:#aaa;font-size:0.95rem;margin-bottom:4px;">' + card.name + '</div>' : ''}
+      <div class="card-set">${card.set_name} (${card.abbreviation})</div>
+      <div class="card-number">${numberDisplay} | ${card.tcgdex_id}</div>
+      ${card.rarity ? '<div class="card-rarity">' + card.rarity + '</div>' : ''}
+      <div class="prices">
+        <div class="price-box">
+          <div class="price-label">Trend</div>
+          <div class="price-value">${fmtPrice(card.price_trend)}</div>
+        </div>
+        <div class="price-box">
+          <div class="price-label">Low</div>
+          <div class="price-value">${fmtPrice(card.price_low)}</div>
+        </div>
+        <div class="price-box">
+          <div class="price-label">Average</div>
+          <div class="price-value">${fmtPrice(card.price_avg)}</div>
+        </div>
+        <div class="price-box">
+          <div class="price-label">Foil Trend</div>
+          <div class="price-value foil">${fmtPrice(card.price_foil_trend)}</div>
+        </div>
+      </div>
+      ${card.cardmarket_url ? '<a class="cm-link" href="' + card.cardmarket_url + '" target="_blank">View on CardMarket</a>' : ''}
+      <div class="match-meta">
+        <span class="method-tag ${data.method}">${data.method}</span>
+        <span>Confidence: ${(data.confidence * 100).toFixed(1)}%</span>
+      </div>
+    </div></div>`;
+
+    // Alternatives
+    if (data.alternatives && data.alternatives.length > 0) {
+      html += `<div class="alternatives"><h3>Other candidates (${data.alternatives.length})</h3>`;
+      for (const alt of data.alternatives) {
+        html += `<div class="alt-card">
+          <div class="alt-name">${alt.name}</div>
+          <div class="alt-set">${alt.set_name} (${alt.abbreviation})</div>
+          <div class="alt-price">${fmtPrice(alt.price_trend)}</div>
+        </div>`;
+      }
+      html += '</div>';
+    }
+
+    resultBox.innerHTML = html;
+
+  } catch (err) {
+    errorEl.textContent = `Error: ${err.message}`;
+  } finally {
+    btn.disabled = false;
+    spinner.classList.remove('active');
+  }
+}
+</script>
+</body>
+</html>

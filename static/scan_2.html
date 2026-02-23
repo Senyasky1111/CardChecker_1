@@ -1,0 +1,553 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Card Scanner v2 - Full Pipeline</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0f0f23; color: #e0e0e0; min-height: 100vh; }
+  .container { max-width: 1100px; margin: 0 auto; padding: 20px; }
+  h1 { text-align: center; color: #ffcc00; font-size: 1.6rem; margin: 20px 0 4px; }
+  h1 span { color: #ff4444; }
+  .subtitle { text-align: center; color: #888; font-size: 0.9rem; margin-bottom: 20px; }
+
+  nav { text-align: center; margin-bottom: 12px; }
+  nav a { color: #64b5f6; text-decoration: none; margin: 0 12px; font-size: 0.9rem; }
+  nav a:hover { text-decoration: underline; }
+
+  .upload-area {
+    border: 2px dashed #444; border-radius: 16px; padding: 40px; text-align: center;
+    margin: 20px 0; cursor: pointer; transition: border-color 0.3s; background: #1a1a2e;
+  }
+  .upload-area:hover { border-color: #ffcc00; }
+  .upload-area.dragover { border-color: #ffcc00; background: #1a1a3e; }
+
+  .btn {
+    display: inline-block; padding: 12px 24px; border: none; border-radius: 8px;
+    font-size: 1rem; cursor: pointer; margin: 8px; font-weight: 600;
+    transition: transform 0.1s, opacity 0.2s;
+  }
+  .btn:hover { transform: scale(1.02); }
+  .btn:active { transform: scale(0.98); }
+  .btn-primary { background: #ffcc00; color: #1a1a2e; }
+  .btn-secondary { background: #333; color: #e0e0e0; }
+  .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+  #fileInput { display: none; }
+
+  .error { color: #ff4444; text-align: center; margin: 16px 0; }
+
+  /* Pipeline progress */
+  .pipeline {
+    display: none; margin: 24px 0;
+  }
+  .pipeline.visible { display: block; }
+
+  .pipeline-steps {
+    display: flex; justify-content: center; align-items: center; gap: 0; margin-bottom: 24px;
+    flex-wrap: wrap;
+  }
+  .step {
+    display: flex; align-items: center; gap: 0;
+  }
+  .step-box {
+    padding: 10px 20px; border-radius: 10px; font-size: 0.85rem; font-weight: 600;
+    background: #1a1a2e; border: 2px solid #333; color: #666;
+    transition: all 0.3s;
+    text-align: center; min-width: 100px;
+  }
+  .step-box.active { border-color: #ffcc00; color: #ffcc00; animation: pulse 1.5s infinite; }
+  .step-box.done { border-color: #4caf50; color: #4caf50; background: #1a2e1a; }
+  .step-box.fail { border-color: #ff4444; color: #ff4444; background: #2e1a1a; }
+  .step-time { font-size: 0.7rem; color: #888; margin-top: 2px; }
+  .step-arrow { color: #444; margin: 0 8px; font-size: 1.2rem; }
+
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.6; }
+  }
+
+  /* Detection section */
+  .detect-result {
+    display: none; margin: 20px 0;
+  }
+  .detect-result.visible { display: block; }
+
+  .detect-images {
+    display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px; margin: 16px 0;
+  }
+  @media (max-width: 800px) {
+    .detect-images { grid-template-columns: 1fr; }
+  }
+
+  .img-box {
+    background: #1a1a2e; border-radius: 12px; overflow: hidden;
+  }
+  .img-box-header {
+    padding: 8px 12px; font-size: 0.8rem; font-weight: 600; color: #888;
+    border-bottom: 1px solid #222; display: flex; justify-content: space-between;
+  }
+  .img-box-tag {
+    padding: 2px 8px; border-radius: 12px; font-size: 0.7rem; font-weight: bold;
+  }
+  .tag-input { background: #333; color: #aaa; }
+  .tag-detect { background: #1b5e20; color: #4caf50; }
+  .tag-warp { background: #0d47a1; color: #42a5f5; }
+
+  .img-box img { width: 100%; display: block; cursor: pointer; }
+  .img-box img:hover { opacity: 0.9; }
+
+  /* Card result */
+  .card-result-box {
+    display: none; background: #1a1a2e; border-radius: 16px; padding: 24px; margin: 24px 0;
+  }
+  .card-result-box.visible { display: block; }
+
+  .ocr-bar {
+    background: #111; border-radius: 10px; padding: 12px 16px; margin-bottom: 16px;
+    font-family: monospace; font-size: 0.85rem;
+    display: flex; flex-wrap: wrap; gap: 20px;
+  }
+  .ocr-item .label { color: #888; }
+  .ocr-item .val { color: #ffcc00; font-weight: bold; }
+
+  .card-layout {
+    display: flex; gap: 24px; align-items: flex-start;
+  }
+  @media (max-width: 700px) {
+    .card-layout { flex-direction: column; align-items: center; }
+  }
+  .card-layout .card-img { max-width: 200px; border-radius: 10px; }
+  .card-layout .card-details { flex: 1; }
+
+  .card-name { font-size: 1.5rem; font-weight: bold; color: #ffcc00; margin-bottom: 6px; }
+  .card-original-name { color: #aaa; font-size: 0.95rem; margin-bottom: 4px; }
+  .card-set { color: #64b5f6; font-size: 1rem; margin-bottom: 4px; }
+  .card-number { color: #aaa; font-size: 0.95rem; margin-bottom: 4px; }
+  .card-rarity { color: #ab47bc; font-size: 0.9rem; margin-bottom: 12px; }
+
+  .prices {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(100px, 1fr));
+    gap: 8px; margin: 16px 0;
+  }
+  .price-box {
+    background: #111; border-radius: 8px; padding: 12px; text-align: center;
+  }
+  .price-label { color: #888; font-size: 0.75rem; text-transform: uppercase; margin-bottom: 4px; }
+  .price-value { font-size: 1.2rem; font-weight: bold; color: #4caf50; }
+  .price-value.foil { color: #ff9800; }
+
+  .cm-link {
+    display: inline-block; margin-top: 12px; padding: 8px 16px;
+    background: #1565c0; color: white; border-radius: 8px; text-decoration: none; font-size: 0.9rem;
+  }
+  .cm-link:hover { background: #1976d2; }
+
+  .match-meta {
+    margin-top: 16px; padding-top: 12px; border-top: 1px solid #333;
+    color: #666; font-size: 0.8rem; display: flex; flex-wrap: wrap; gap: 12px;
+  }
+  .method-tag {
+    display: inline-block; padding: 2px 10px; border-radius: 4px;
+    font-size: 0.75rem; font-weight: bold; text-transform: uppercase;
+  }
+  .method-tag.ocr_exact { background: #1b5e20; color: #4caf50; }
+  .method-tag.ocr_name { background: #0d47a1; color: #42a5f5; }
+  .method-tag.ocr_number { background: #e65100; color: #ff9800; }
+  .method-tag.clip_only { background: #4a148c; color: #ce93d8; }
+
+  .alternatives {
+    margin-top: 16px; padding-top: 12px; border-top: 1px solid #333;
+  }
+  .alternatives h3 { color: #888; font-size: 0.9rem; margin-bottom: 8px; }
+  .alt-card {
+    display: flex; gap: 12px; padding: 8px; background: #111; border-radius: 8px; margin: 4px 0;
+    align-items: center;
+  }
+  .alt-card .alt-name { color: #e0e0e0; flex: 1; }
+  .alt-card .alt-set { color: #64b5f6; font-size: 0.85rem; }
+  .alt-card .alt-price { color: #4caf50; font-weight: bold; }
+
+  /* Fail state */
+  .fail-box { text-align: center; padding: 32px; }
+  .fail-box .fail-text { color: #ff4444; font-size: 1.2rem; }
+  .fail-box .fail-hint { color: #888; font-size: 0.9rem; margin-top: 8px; }
+
+  /* Overlay */
+  .overlay {
+    display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+    background: rgba(0,0,0,0.92); z-index: 1000; cursor: pointer;
+    justify-content: center; align-items: center;
+  }
+  .overlay.visible { display: flex; }
+  .overlay img { max-width: 95%; max-height: 95%; border-radius: 8px; }
+</style>
+</head>
+<body>
+<div class="container">
+  <nav>
+    <a href="/">&larr; Home</a>
+    <a href="/detect-test">Detector Test</a>
+    <a href="/scan">Scan v1</a>
+  </nav>
+
+  <h1>Card<span>Scanner</span> v2</h1>
+  <p class="subtitle">Photo &rarr; Detect card &rarr; Perspective correct &rarr; OCR &rarr; Identify &rarr; Price</p>
+
+  <div class="upload-area" id="dropZone">
+    <p style="font-size: 1.1rem; margin-bottom: 16px;">Drop a card photo here or click to upload</p>
+    <button class="btn btn-primary" onclick="document.getElementById('fileInput').click()">Upload Photo</button>
+    <button class="btn btn-secondary" onclick="openCamera()">Take Photo</button>
+    <input type="file" id="fileInput" accept="image/*" capture="environment">
+  </div>
+
+  <div style="text-align: center;">
+    <button class="btn btn-primary" id="scanBtn" onclick="runScan()" disabled>Scan Card</button>
+  </div>
+
+  <div class="error" id="error"></div>
+
+  <!-- Pipeline progress -->
+  <div class="pipeline" id="pipeline">
+    <div class="pipeline-steps">
+      <div class="step">
+        <div class="step-box" id="step-detect">
+          Detect<div class="step-time" id="step-detect-time"></div>
+        </div>
+      </div>
+      <span class="step-arrow">&rarr;</span>
+      <div class="step">
+        <div class="step-box" id="step-warp">
+          Warp<div class="step-time" id="step-warp-time"></div>
+        </div>
+      </div>
+      <span class="step-arrow">&rarr;</span>
+      <div class="step">
+        <div class="step-box" id="step-ocr">
+          OCR<div class="step-time" id="step-ocr-time"></div>
+        </div>
+      </div>
+      <span class="step-arrow">&rarr;</span>
+      <div class="step">
+        <div class="step-box" id="step-match">
+          Match<div class="step-time" id="step-match-time"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Detection visualization -->
+  <div class="detect-result" id="detectResult">
+    <div class="detect-images" id="detectImages"></div>
+  </div>
+
+  <!-- Card identification result -->
+  <div class="card-result-box" id="cardResult"></div>
+</div>
+
+<!-- Fullscreen overlay -->
+<div class="overlay" id="overlay" onclick="closeOverlay()">
+  <img id="overlayImg" alt="Fullscreen">
+</div>
+
+<script>
+const API = window.location.origin;
+let selectedFile = null;
+let previewUrl = null;
+
+document.getElementById('fileInput').addEventListener('change', (e) => {
+  if (e.target.files.length > 0) handleFile(e.target.files[0]);
+});
+
+const dropZone = document.getElementById('dropZone');
+dropZone.addEventListener('dragover', (e) => { e.preventDefault(); dropZone.classList.add('dragover'); });
+dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragover'));
+dropZone.addEventListener('drop', (e) => {
+  e.preventDefault(); dropZone.classList.remove('dragover');
+  if (e.dataTransfer.files.length > 0) handleFile(e.dataTransfer.files[0]);
+});
+
+function openCamera() {
+  const input = document.getElementById('fileInput');
+  input.setAttribute('capture', 'environment');
+  input.click();
+}
+
+function handleFile(file) {
+  selectedFile = file;
+  if (previewUrl) URL.revokeObjectURL(previewUrl);
+  previewUrl = URL.createObjectURL(file);
+  document.getElementById('scanBtn').disabled = false;
+  document.getElementById('pipeline').classList.remove('visible');
+  document.getElementById('detectResult').classList.remove('visible');
+  document.getElementById('cardResult').classList.remove('visible');
+  document.getElementById('error').textContent = '';
+  resetSteps();
+}
+
+function fmtPrice(val) {
+  if (val === null || val === undefined) return '-';
+  return '\u20AC' + val.toFixed(2);
+}
+
+function resetSteps() {
+  ['detect', 'warp', 'ocr', 'match'].forEach(s => {
+    const el = document.getElementById('step-' + s);
+    el.className = 'step-box';
+    document.getElementById('step-' + s + '-time').textContent = '';
+  });
+}
+
+function setStep(name, state, timeMs) {
+  const el = document.getElementById('step-' + name);
+  el.className = 'step-box ' + state;
+  if (timeMs !== undefined) {
+    document.getElementById('step-' + name + '-time').textContent = timeMs.toFixed(0) + 'ms';
+  }
+}
+
+async function runScan() {
+  if (!selectedFile) return;
+
+  const btn = document.getElementById('scanBtn');
+  const errorEl = document.getElementById('error');
+  const pipeline = document.getElementById('pipeline');
+  const detectResult = document.getElementById('detectResult');
+  const cardResult = document.getElementById('cardResult');
+
+  btn.disabled = true;
+  errorEl.textContent = '';
+  pipeline.classList.add('visible');
+  detectResult.classList.remove('visible');
+  cardResult.classList.remove('visible');
+  resetSteps();
+
+  try {
+    // === Step 1: Detect card ===
+    setStep('detect', 'active');
+
+    const formData1 = new FormData();
+    formData1.append('file', selectedFile);
+
+    const t1 = performance.now();
+    const detectResp = await fetch(`${API}/detect-card?visualize=true`, {
+      method: 'POST', body: formData1,
+    });
+    if (!detectResp.ok) {
+      const errText = await detectResp.text();
+      throw new Error(`Detect failed (${detectResp.status}): ${errText.substring(0, 200)}`);
+    }
+    const detectData = await detectResp.json();
+    const detectMs = performance.now() - t1;
+
+    if (detectData.card_found) {
+      setStep('detect', 'done', detectData.processing_time_ms);
+    } else {
+      setStep('detect', 'fail', detectData.processing_time_ms);
+    }
+
+    // Show warp step as done (it's part of detect)
+    setStep('warp', detectData.warped_url ? 'done' : 'fail');
+
+    // Show detection images
+    showDetectImages(detectData);
+
+    // === Step 2: Identify (OCR + Match happens server-side) ===
+    setStep('ocr', 'active');
+    setStep('match', 'active');
+
+    const formData2 = new FormData();
+    formData2.append('file', selectedFile);
+
+    const t2 = performance.now();
+    const identifyResp = await fetch(`${API}/identify-v2`, {
+      method: 'POST', body: formData2,
+    });
+    if (!identifyResp.ok) {
+      const errText = await identifyResp.text();
+      throw new Error(`Identify failed (${identifyResp.status}): ${errText.substring(0, 200)}`);
+    }
+    const identifyData = await identifyResp.json();
+    const identifyMs = performance.now() - t2;
+
+    // OCR and match are combined in identify-v2, split the time roughly
+    const serverMs = identifyData.processing_time_ms || identifyMs;
+    setStep('ocr', identifyData.ocr_name || identifyData.ocr_number ? 'done' : 'fail', serverMs * 0.7);
+    setStep('match', identifyData.success ? 'done' : 'fail', serverMs * 0.3);
+
+    // Show card result
+    showCardResult(identifyData);
+
+  } catch (err) {
+    errorEl.textContent = `Error: ${err.message}`;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function showDetectImages(data) {
+  const container = document.getElementById('detectResult');
+  const grid = document.getElementById('detectImages');
+
+  let html = '';
+
+  // Original
+  html += `
+    <div class="img-box">
+      <div class="img-box-header">
+        <span>Original</span>
+        <span class="img-box-tag tag-input">INPUT</span>
+      </div>
+      <img src="${previewUrl}" alt="Original" onclick="openOverlay(this.src)">
+    </div>
+  `;
+
+  // Annotated
+  if (data.annotated_url) {
+    const conf = (data.confidence * 100).toFixed(1);
+    html += `
+      <div class="img-box">
+        <div class="img-box-header">
+          <span>${data.method} (${conf}%)</span>
+          <span class="img-box-tag tag-detect">${data.card_found ? 'FOUND' : 'NOT FOUND'}</span>
+        </div>
+        <img src="${data.annotated_url}?t=${Date.now()}" alt="Detected" onclick="openOverlay(this.src)">
+      </div>
+    `;
+  }
+
+  // Warped
+  if (data.warped_url) {
+    html += `
+      <div class="img-box">
+        <div class="img-box-header">
+          <span>Perspective Corrected</span>
+          <span class="img-box-tag tag-warp">600x825</span>
+        </div>
+        <img src="${data.warped_url}?t=${Date.now()}" alt="Warped" onclick="openOverlay(this.src)"
+             style="max-height: 400px; width: auto; margin: 0 auto;">
+      </div>
+    `;
+  }
+
+  grid.innerHTML = html;
+  container.classList.add('visible');
+}
+
+function showCardResult(data) {
+  const box = document.getElementById('cardResult');
+
+  if (!data.success) {
+    box.innerHTML = `
+      <div class="fail-box">
+        <div class="fail-text">Could not identify card</div>
+        <div class="fail-hint">
+          ${data.ocr_name ? 'OCR read: "' + data.ocr_name + '"' : 'Name not detected.'}
+          ${data.ocr_number ? ' | Number: ' + data.ocr_number : ' | Number not detected.'}
+          <br>Try a clearer photo where text is readable.
+        </div>
+      </div>`;
+    box.classList.add('visible');
+    return;
+  }
+
+  const card = data.top_match;
+  const langFlags = {'en': 'EN', 'ja': 'JP', 'zh-tw': 'TW'};
+  const langFlag = langFlags[data.detected_language] || data.detected_language;
+  const cardLang = langFlags[card.language] || card.language;
+
+  // Image URL
+  let imgSrc = '';
+  if (card.image_url) {
+    imgSrc = card.image_url.includes('assets.tcgdex.net')
+      ? card.image_url + '/high.webp'
+      : card.image_url;
+  }
+
+  // Display name
+  const displayName = card.eng_name && card.eng_name !== card.name ? card.eng_name : card.name;
+  const showOriginal = card.eng_name && card.eng_name !== card.name;
+  const numberDisplay = card.set_total ? `#${card.collector_number}/${card.set_total}` : `#${card.collector_number || '?'}`;
+
+  let html = '';
+
+  // OCR info bar
+  html += `
+    <div class="ocr-bar">
+      <div class="ocr-item"><span class="label">OCR Name: </span><span class="val">${data.ocr_name || '-'}</span></div>
+      <div class="ocr-item"><span class="label">Number: </span><span class="val">${data.ocr_number || '-'}</span></div>
+      <div class="ocr-item"><span class="label">Lang: </span><span class="val">${langFlag}</span></div>
+      <div class="ocr-item"><span class="label">Time: </span><span class="val">${data.processing_time_ms.toFixed(0)}ms</span></div>
+    </div>
+  `;
+
+  // Main card
+  html += `<div class="card-layout">`;
+  if (imgSrc) {
+    html += `<img class="card-img" src="${imgSrc}" alt="${card.name}" onerror="this.style.display='none'">`;
+  }
+
+  html += `
+    <div class="card-details">
+      <div class="card-name">${displayName} <span style="font-size:0.8rem;color:#888;">[${cardLang}]</span></div>
+      ${showOriginal ? '<div class="card-original-name">' + card.name + '</div>' : ''}
+      <div class="card-set">${card.set_name} (${card.abbreviation})</div>
+      <div class="card-number">${numberDisplay} | ${card.tcgdex_id}</div>
+      ${card.rarity ? '<div class="card-rarity">' + card.rarity + '</div>' : ''}
+      <div class="prices">
+        <div class="price-box">
+          <div class="price-label">Trend</div>
+          <div class="price-value">${fmtPrice(card.price_trend)}</div>
+        </div>
+        <div class="price-box">
+          <div class="price-label">Low</div>
+          <div class="price-value">${fmtPrice(card.price_low)}</div>
+        </div>
+        <div class="price-box">
+          <div class="price-label">Average</div>
+          <div class="price-value">${fmtPrice(card.price_avg)}</div>
+        </div>
+        <div class="price-box">
+          <div class="price-label">Foil Trend</div>
+          <div class="price-value foil">${fmtPrice(card.price_foil_trend)}</div>
+        </div>
+      </div>
+      ${card.cardmarket_url ? '<a class="cm-link" href="' + card.cardmarket_url + '" target="_blank">View on CardMarket &rarr;</a>' : ''}
+      <div class="match-meta">
+        <span class="method-tag ${data.method}">${data.method}</span>
+        <span>Confidence: ${(data.confidence * 100).toFixed(1)}%</span>
+      </div>
+    </div>
+  </div>`;
+
+  // Alternatives
+  if (data.alternatives && data.alternatives.length > 0) {
+    html += `<div class="alternatives"><h3>Other candidates (${data.alternatives.length})</h3>`;
+    for (const alt of data.alternatives) {
+      const altName = alt.eng_name && alt.eng_name !== alt.name ? alt.eng_name : alt.name;
+      html += `
+        <div class="alt-card">
+          <div class="alt-name">${altName}</div>
+          <div class="alt-set">${alt.set_name} (${alt.abbreviation})</div>
+          <div class="alt-price">${fmtPrice(alt.price_trend)}</div>
+        </div>`;
+    }
+    html += '</div>';
+  }
+
+  box.innerHTML = html;
+  box.classList.add('visible');
+}
+
+function openOverlay(src) {
+  document.getElementById('overlayImg').src = src;
+  document.getElementById('overlay').classList.add('visible');
+}
+function closeOverlay() {
+  document.getElementById('overlay').classList.remove('visible');
+}
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeOverlay(); });
+</script>
+</body>
+</html>

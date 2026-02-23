@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CardChecker - Pokemon Card Scanner</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0f0f23; color: #e0e0e0; min-height: 100vh; }
+  .container { max-width: 800px; margin: 0 auto; padding: 20px; }
+  h1 { text-align: center; color: #ffcc00; font-size: 1.8rem; margin: 20px 0; }
+  h1 span { color: #ff4444; }
+
+  .upload-area { 
+    border: 2px dashed #444; border-radius: 16px; padding: 40px; text-align: center;
+    margin: 20px 0; cursor: pointer; transition: border-color 0.3s;
+    background: #1a1a2e;
+  }
+  .upload-area:hover { border-color: #ffcc00; }
+  .upload-area.dragover { border-color: #ffcc00; background: #1a1a3e; }
+
+  .btn { 
+    display: inline-block; padding: 12px 24px; border: none; border-radius: 8px;
+    font-size: 1rem; cursor: pointer; margin: 8px; font-weight: 600;
+    transition: transform 0.1s, opacity 0.2s;
+  }
+  .btn:hover { transform: scale(1.02); }
+  .btn:active { transform: scale(0.98); }
+  .btn-primary { background: #ffcc00; color: #1a1a2e; }
+  .btn-secondary { background: #333; color: #e0e0e0; }
+  .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+  #preview { max-width: 300px; max-height: 400px; border-radius: 12px; margin: 16px auto; display: none; }
+  #fileInput { display: none; }
+
+  .results { margin-top: 24px; }
+  .result-card {
+    background: #1a1a2e; border-radius: 12px; padding: 20px; margin: 12px 0;
+    border-left: 4px solid #ffcc00;
+  }
+  .result-card.alt { border-left-color: #555; }
+  .result-card h3 { color: #ffcc00; font-size: 1.2rem; margin-bottom: 8px; }
+  .result-card.alt h3 { color: #888; }
+  .result-meta { display: flex; flex-wrap: wrap; gap: 16px; margin: 8px 0; }
+  .result-meta .tag { 
+    background: #252540; padding: 4px 12px; border-radius: 20px; font-size: 0.85rem;
+  }
+  .confidence { color: #4caf50; font-weight: bold; }
+  .confidence.low { color: #ff9800; }
+  .price { color: #ffcc00; font-size: 1.1rem; font-weight: bold; }
+  .cm-link { 
+    display: inline-block; margin-top: 8px; color: #64b5f6; text-decoration: none;
+    font-size: 0.9rem;
+  }
+  .cm-link:hover { text-decoration: underline; }
+
+  .spinner { display: none; text-align: center; margin: 20px 0; }
+  .spinner.active { display: block; }
+  .spinner::after { 
+    content: ''; display: inline-block; width: 32px; height: 32px;
+    border: 3px solid #333; border-top-color: #ffcc00; border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .timing { color: #666; font-size: 0.8rem; text-align: center; margin-top: 8px; }
+  .error { color: #ff4444; text-align: center; margin: 16px 0; }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>&#9889; Card<span>Checker</span></h1>
+
+  <div class="upload-area" id="dropZone">
+    <p style="font-size: 1.1rem; margin-bottom: 16px;">Drop a card photo here or click to upload</p>
+    <button class="btn btn-primary" onclick="document.getElementById('fileInput').click()">
+      Upload Photo
+    </button>
+    <button class="btn btn-secondary" onclick="openCamera()">
+      Take Photo
+    </button>
+    <input type="file" id="fileInput" accept="image/*" capture="environment">
+  </div>
+
+  <img id="preview" alt="Card preview">
+
+  <div style="text-align: center;">
+    <button class="btn btn-primary" id="identifyBtn" onclick="identify()" disabled>
+      Identify Card
+    </button>
+  </div>
+
+  <div class="spinner" id="spinner"></div>
+  <div class="error" id="error"></div>
+  <div class="results" id="results"></div>
+  <div class="timing" id="timing"></div>
+</div>
+
+<script>
+const API = window.location.origin;
+let selectedFile = null;
+
+// File input
+document.getElementById('fileInput').addEventListener('change', (e) => {
+  if (e.target.files.length > 0) handleFile(e.target.files[0]);
+});
+
+// Drag & drop
+const dropZone = document.getElementById('dropZone');
+dropZone.addEventListener('dragover', (e) => { e.preventDefault(); dropZone.classList.add('dragover'); });
+dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragover'));
+dropZone.addEventListener('drop', (e) => {
+  e.preventDefault(); dropZone.classList.remove('dragover');
+  if (e.dataTransfer.files.length > 0) handleFile(e.dataTransfer.files[0]);
+});
+
+function openCamera() {
+  const input = document.getElementById('fileInput');
+  input.setAttribute('capture', 'environment');
+  input.click();
+}
+
+function handleFile(file) {
+  selectedFile = file;
+  const preview = document.getElementById('preview');
+  preview.src = URL.createObjectURL(file);
+  preview.style.display = 'block';
+  document.getElementById('identifyBtn').disabled = false;
+  document.getElementById('results').innerHTML = '';
+  document.getElementById('error').textContent = '';
+  document.getElementById('timing').textContent = '';
+}
+
+async function identify() {
+  if (!selectedFile) return;
+  
+  const btn = document.getElementById('identifyBtn');
+  const spinner = document.getElementById('spinner');
+  const errorEl = document.getElementById('error');
+  const resultsEl = document.getElementById('results');
+  const timingEl = document.getElementById('timing');
+  
+  btn.disabled = true;
+  spinner.classList.add('active');
+  errorEl.textContent = '';
+  resultsEl.innerHTML = '';
+  timingEl.textContent = '';
+
+  try {
+    const formData = new FormData();
+    formData.append('file', selectedFile);
+
+    const resp = await fetch(`${API}/identify?k=5&use_ocr=true`, {
+      method: 'POST',
+      body: formData,
+    });
+    const data = await resp.json();
+
+    if (!data.success) {
+      errorEl.textContent = 'Could not identify card. Try a clearer photo.';
+      return;
+    }
+
+    let timingText = `${data.method.toUpperCase()} | ${data.processing_time_ms.toFixed(0)}ms`;
+    if (data.ocr) {
+      const parts = [];
+      if (data.ocr.name) parts.push(`name: "${data.ocr.name}"`);
+      if (data.ocr.collector_number) parts.push(`#${data.ocr.collector_number}`);
+      if (parts.length) timingText += ` | OCR: ${parts.join(', ')}`;
+    }
+    timingEl.textContent = timingText;
+
+    // Top match
+    resultsEl.innerHTML = renderCard(data.top_match, false);
+
+    // Alternatives
+    if (data.alternatives && data.alternatives.length > 0) {
+      resultsEl.innerHTML += '<h3 style="color:#888; margin-top:20px; font-size:0.9rem;">Other possibilities:</h3>';
+      data.alternatives.forEach(alt => {
+        resultsEl.innerHTML += renderCard(alt, true);
+      });
+    }
+  } catch (err) {
+    errorEl.textContent = `Error: ${err.message}`;
+  } finally {
+    btn.disabled = false;
+    spinner.classList.remove('active');
+  }
+}
+
+function renderCard(card, isAlt) {
+  const confClass = card.confidence > 0.9 ? 'confidence' : 'confidence low';
+  const confPct = (card.confidence * 100).toFixed(1);
+  const priceStr = card.price_trend > 0 ? `${card.price_trend.toFixed(2)} EUR` : 'N/A';
+  
+  return `
+    <div class="result-card ${isAlt ? 'alt' : ''}">
+      <h3>${card.name}</h3>
+      <div class="result-meta">
+        <span class="tag">${card.expansion || 'Unknown set'}</span>
+        <span class="tag ${confClass}">${confPct}% match</span>
+        <span class="tag price">${priceStr}</span>
+      </div>
+      <a class="cm-link" href="${card.cardmarket_url}" target="_blank" rel="noopener">
+        View on CardMarket &rarr;
+      </a>
+    </div>
+  `;
+}
+</script>
+</body>
+</html>
