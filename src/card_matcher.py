@@ -448,7 +448,14 @@ class CardMatcher:
 
                 img_path = Path(local_path)
                 if not img_path.is_absolute():
-                    img_path = Path(".") / local_path
+                    # Try common base directories
+                    for base in [Path("."), Path("data/cardmarket")]:
+                        candidate_path = base / local_path
+                        if candidate_path.exists():
+                            img_path = candidate_path
+                            break
+                    else:
+                        img_path = Path(".") / local_path
 
                 if not img_path.exists():
                     scored.append((0.0, c))

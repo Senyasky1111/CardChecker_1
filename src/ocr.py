@@ -38,6 +38,16 @@ CROP_NAME = {
     "x_end": 0.770,    # ~462px from left (before HP)
 }
 
+# Extended name crop for Trainer/Supporter/full-art cards where the card name
+# sits below the type banner (e.g. "Supporter ... TRAINER" is in the banner,
+# but the actual name "Judge" is on a separate line below it).
+CROP_NAME_EXTENDED = {
+    "y_start": 0.012,
+    "y_end": 0.155,    # ~128px — includes name line below banner
+    "x_start": 0.050,
+    "x_end": 0.770,
+}
+
 # Narrow horizontal bands at the bottom for collector number extraction.
 # The number "057/191" is always in the last 10-15% of card height.
 # Using narrow bands + 4x upscale gives much better OCR accuracy than
@@ -501,8 +511,29 @@ class CardOCR:
     def _extract_name(
         self, card_img: Image.Image
     ) -> tuple[Optional[str], float]:
-        """Extract the card name from the top banner region."""
-        region = self._crop_region(card_img, CROP_NAME)
+        """Extract the card name from the top banner region.
+
+        Uses two-pass strategy:
+        1. Standard crop (top banner) — works for most Pokemon cards
+        2. Extended crop (includes line below banner) — catches Trainer/Supporter
+           names like "Judge", "Boss's Orders" that sit below the type banner
+        """
+        name, conf = self._ocr_name_region(card_img, CROP_NAME)
+
+        # If standard crop failed or got garbage, try extended crop
+        # (Trainer/Supporter cards have name below the banner)
+        if name is None or conf < 0.4:
+            ext_name, ext_conf = self._ocr_name_region(card_img, CROP_NAME_EXTENDED)
+            if ext_name and ext_conf > (conf or 0):
+                return ext_name, ext_conf
+
+        return name, conf
+
+    def _ocr_name_region(
+        self, card_img: Image.Image, crop_region: dict
+    ) -> tuple[Optional[str], float]:
+        """Run OCR on a specific crop region and return best name candidate."""
+        region = self._crop_region(card_img, crop_region)
 
         # Use color image upscaled 2x (works better than threshold for names)
         region_np = np.array(region.convert("RGB"))
@@ -522,25 +553,32 @@ class CardOCR:
         if not results:
             return None, 0.0
 
-        # Sort by Y position (topmost first), then by confidence
+        # Collect valid candidates
+        _NOISE = {"HP", "hp", "Hp", "hP", "EX", "GX", "ex", "gx", "V", "VMAX", "VSTAR",
+                  "TRAINER", "Trainer", "trainer"}
         candidates = []
         for bbox, text, conf in results:
             if conf < 0.10:
                 continue
-            y_pos = bbox[0][1] if isinstance(bbox[0], (list, tuple)) else 0
-            candidates.append((y_pos, conf, text))
-        candidates.sort(key=lambda x: (x[0], -x[1]))
-
-        # Try each candidate — the card name is typically the topmost text
-        # that isn't a stage label or subtitle
-        # Noise words that are NOT card names (OCR artifacts from HP, stage labels, etc.)
-        _NOISE = {"HP", "hp", "Hp", "hP", "EX", "GX", "ex", "gx", "V", "VMAX", "VSTAR"}
-        for y_pos, conf, text in candidates:
             cleaned = self._clean_name(text)
             if cleaned and len(cleaned) >= 2 and cleaned.strip() not in _NOISE:
-                return cleaned, conf
+                y_pos = bbox[0][1] if isinstance(bbox[0], (list, tuple)) else 0
+                candidates.append((y_pos, conf, cleaned))
 
-        return None, 0.0
+        if not candidates:
+            return None, 0.0
+
+        # Strategy: if there's a high-confidence candidate (>= 0.7), prefer it
+        # regardless of Y position (handles Trainer cards where name is below banner).
+        # Otherwise, take the topmost candidate.
+        high_conf = [(y, c, t) for y, c, t in candidates if c >= 0.7]
+        if high_conf:
+            high_conf.sort(key=lambda x: x[0])  # topmost among high-conf
+            return high_conf[0][2], high_conf[0][1]
+
+        # No high-confidence — take topmost
+        candidates.sort(key=lambda x: (x[0], -x[1]))
+        return candidates[0][2], candidates[0][1]
 
     @staticmethod
     def _clean_name(raw: str) -> str:
