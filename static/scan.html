@@ -112,6 +112,34 @@
   .fail-box .fail-icon { font-size: 3rem; margin-bottom: 12px; }
   .fail-box .fail-text { color: #ff4444; font-size: 1.2rem; }
   .fail-box .fail-hint { color: #888; font-size: 0.9rem; margin-top: 8px; }
+
+  /* Engine toggle */
+  .engine-toggle {
+    display: flex; justify-content: center; align-items: center; gap: 12px;
+    margin: 16px 0;
+  }
+  .engine-label { font-size: 0.9rem; color: #888; font-weight: 600; }
+  .engine-label.active { color: #ffcc00; }
+  .toggle-switch {
+    position: relative; width: 52px; height: 28px; cursor: pointer;
+  }
+  .toggle-switch input { display: none; }
+  .toggle-slider {
+    position: absolute; top: 0; left: 0; right: 0; bottom: 0;
+    background: #333; border-radius: 28px; transition: background 0.3s;
+  }
+  .toggle-slider::before {
+    content: ''; position: absolute; width: 22px; height: 22px;
+    left: 3px; bottom: 3px; background: #e0e0e0; border-radius: 50%;
+    transition: transform 0.3s;
+  }
+  .toggle-switch input:checked + .toggle-slider { background: #7c4dff; }
+  .toggle-switch input:checked + .toggle-slider::before { transform: translateX(24px); }
+  .gemini-badge {
+    display: inline-block; padding: 2px 8px; border-radius: 4px;
+    font-size: 0.75rem; font-weight: bold; text-transform: uppercase;
+    background: #4a148c; color: #ce93d8;
+  }
 </style>
 </head>
 <body>
@@ -129,6 +157,15 @@
     <img id="preview" alt="Card preview">
   </div>
 
+  <div class="engine-toggle">
+    <span class="engine-label active" id="labelLocal">OCR + CLIP</span>
+    <label class="toggle-switch">
+      <input type="checkbox" id="geminiToggle" onchange="updateToggle()">
+      <span class="toggle-slider"></span>
+    </label>
+    <span class="engine-label" id="labelGemini">✨ Gemini AI</span>
+  </div>
+
   <div style="text-align: center;">
     <button class="btn btn-primary" id="scanBtn" onclick="scan()" disabled>Scan Card</button>
   </div>
@@ -142,6 +179,14 @@
 <script>
 const API = window.location.origin;
 let selectedFile = null;
+let useGemini = false;
+
+function updateToggle() {
+  useGemini = document.getElementById('geminiToggle').checked;
+  document.getElementById('labelLocal').classList.toggle('active', !useGemini);
+  document.getElementById('labelGemini').classList.toggle('active', useGemini);
+  document.getElementById('scanBtn').textContent = useGemini ? '✨ Scan with Gemini' : 'Scan Card';
+}
 
 document.getElementById('fileInput').addEventListener('change', (e) => {
   if (e.target.files.length > 0) handleFile(e.target.files[0]);
@@ -170,6 +215,28 @@ function fmtPrice(val) {
   return '\u20AC' + val.toFixed(2);
 }
 
+function buildCmLinks(dbUrl, geminiUrl) {
+  // Normalize URLs for comparison (strip trailing slashes, query params)
+  const norm = (u) => u ? u.replace(/\/+$/, '').split('?')[0].toLowerCase() : '';
+  const db = dbUrl || '';
+  const gem = geminiUrl || '';
+
+  if (!db && !gem) return '';
+
+  // If only one exists, show it
+  if (db && !gem) return '<a class="cm-link" href="' + db + '" target="_blank">View on CardMarket</a>';
+  if (!db && gem) return '<a class="cm-link" href="' + gem + '" target="_blank">View on CardMarket (Gemini)</a>';
+
+  // Both exist — check if they point to the same page
+  if (norm(db) === norm(gem)) {
+    return '<a class="cm-link" href="' + db + '" target="_blank">View on CardMarket</a>';
+  }
+
+  // Different URLs — show both
+  return '<a class="cm-link" href="' + db + '" target="_blank">CardMarket (DB)</a> '
+       + '<a class="cm-link" href="' + gem + '" target="_blank" style="background:#7c4dff;">CardMarket (Gemini)</a>';
+}
+
 async function scan() {
   if (!selectedFile) return;
 
@@ -187,6 +254,21 @@ async function scan() {
     const formData = new FormData();
     formData.append('file', selectedFile);
 
+    if (useGemini) {
+      await scanGemini(formData, resultBox);
+    } else {
+      await scanLocal(formData, resultBox);
+    }
+
+  } catch (err) {
+    errorEl.textContent = `Error: ${err.message}`;
+  } finally {
+    btn.disabled = false;
+    spinner.classList.remove('active');
+  }
+}
+
+async function scanLocal(formData, resultBox) {
     const resp = await fetch(`${API}/identify-v2`, { method: 'POST', body: formData });
     if (!resp.ok) {
       const errText = await resp.text();
@@ -210,23 +292,15 @@ async function scan() {
     }
 
     const card = data.top_match;
-    // TCGdex EN images need /high.webp suffix; JP/TW images are already full URLs
     let imgSrc = '';
     if (card.image_url) {
-      if (card.image_url.includes('assets.tcgdex.net')) {
-        imgSrc = card.image_url + '/high.webp';
-      } else {
-        imgSrc = card.image_url;
-      }
+      imgSrc = card.image_url.includes('assets.tcgdex.net') ? card.image_url + '/high.webp' : card.image_url;
     }
 
     let html = '';
-
-    // Language flags
     const langFlags = {'en': 'EN', 'ja': 'JP', 'zh-tw': 'TW', 'zh-cn': 'CN'};
     const langFlag = langFlags[data.detected_language] || data.detected_language;
 
-    // OCR info
     html += `<div class="ocr-info">
       <span class="ocr-label">OCR Name:</span> <span class="ocr-value">${data.ocr_name || '-'}</span>
       <span class="ocr-label">Number:</span> <span class="ocr-value">${data.ocr_number || '-'}</span>
@@ -234,12 +308,10 @@ async function scan() {
       <span class="ocr-label">Time:</span> <span class="ocr-value">${data.processing_time_ms.toFixed(0)}ms</span>
     </div>`;
 
-    // Main card
     html += `<div class="card-result">`;
     if (imgSrc) {
       html += `<img class="card-image" src="${imgSrc}" alt="${card.name}" onerror="this.style.display='none'">`;
     }
-    // Display name: eng_name if available, otherwise name
     const displayName = card.eng_name && card.eng_name !== card.name ? card.eng_name : card.name;
     const showOriginal = card.eng_name && card.eng_name !== card.name;
     const cardLang = langFlags[card.language] || card.language;
@@ -252,22 +324,10 @@ async function scan() {
       <div class="card-number">${numberDisplay} | ${card.tcgdex_id}</div>
       ${card.rarity ? '<div class="card-rarity">' + card.rarity + '</div>' : ''}
       <div class="prices">
-        <div class="price-box">
-          <div class="price-label">Trend</div>
-          <div class="price-value">${fmtPrice(card.price_trend)}</div>
-        </div>
-        <div class="price-box">
-          <div class="price-label">Low</div>
-          <div class="price-value">${fmtPrice(card.price_low)}</div>
-        </div>
-        <div class="price-box">
-          <div class="price-label">Average</div>
-          <div class="price-value">${fmtPrice(card.price_avg)}</div>
-        </div>
-        <div class="price-box">
-          <div class="price-label">Foil Trend</div>
-          <div class="price-value foil">${fmtPrice(card.price_foil_trend)}</div>
-        </div>
+        <div class="price-box"><div class="price-label">Trend</div><div class="price-value">${fmtPrice(card.price_trend)}</div></div>
+        <div class="price-box"><div class="price-label">Low</div><div class="price-value">${fmtPrice(card.price_low)}</div></div>
+        <div class="price-box"><div class="price-label">Average</div><div class="price-value">${fmtPrice(card.price_avg)}</div></div>
+        <div class="price-box"><div class="price-label">Foil Trend</div><div class="price-value foil">${fmtPrice(card.price_foil_trend)}</div></div>
       </div>
       ${card.cardmarket_url ? '<a class="cm-link" href="' + card.cardmarket_url + '" target="_blank">View on CardMarket</a>' : ''}
       <div class="match-meta">
@@ -276,7 +336,6 @@ async function scan() {
       </div>
     </div></div>`;
 
-    // Alternatives
     if (data.alternatives && data.alternatives.length > 0) {
       html += `<div class="alternatives"><h3>Other candidates (${data.alternatives.length})</h3>`;
       for (const alt of data.alternatives) {
@@ -290,13 +349,60 @@ async function scan() {
     }
 
     resultBox.innerHTML = html;
+}
 
-  } catch (err) {
-    errorEl.textContent = `Error: ${err.message}`;
-  } finally {
-    btn.disabled = false;
-    spinner.classList.remove('active');
-  }
+async function scanGemini(formData, resultBox) {
+    const resp = await fetch(`${API}/gemini/identify?use_search=true`, { method: 'POST', body: formData });
+    if (!resp.ok) {
+      const errText = await resp.text();
+      throw new Error(`Gemini error (${resp.status}): ${errText.substring(0, 200)}`);
+    }
+    const data = await resp.json();
+
+    resultBox.classList.add('visible');
+
+    if (!data.success) {
+      resultBox.innerHTML = `
+        <div class="fail-box">
+          <div class="fail-text">Gemini could not identify this card</div>
+          <div class="fail-hint">${data.notes || 'Try taking a clearer photo.'}</div>
+        </div>`;
+      return;
+    }
+
+    let html = '';
+
+    // Gemini meta info
+    html += `<div class="ocr-info">
+      <span class="gemini-badge">✨ Gemini</span>
+      <span class="ocr-label" style="margin-left:12px;">Model:</span> <span class="ocr-value">${data.model_used || '-'}</span>
+      <span class="ocr-label">Search:</span> <span class="ocr-value">${data.search_used ? 'Yes' : 'No'}</span>
+      <span class="ocr-label">Time:</span> <span class="ocr-value">${data.processing_time_ms.toFixed(0)}ms</span>
+    </div>`;
+
+    // Card info
+    const displayName = data.card_name_english || data.card_name || 'Unknown';
+    const showOriginal = data.card_name_english && data.card_name && data.card_name_english !== data.card_name;
+
+    html += `<div class="card-result"><div class="card-info" style="flex:1;">
+      <div class="card-name">${displayName} <span style="font-size:0.8rem;color:#888;">[${(data.language || 'en').toUpperCase()}]</span></div>
+      ${showOriginal ? '<div style="color:#aaa;font-size:0.95rem;margin-bottom:4px;">' + data.card_name + '</div>' : ''}
+      <div class="card-set">${data.set_name || '-'} ${data.set_abbreviation ? '(' + data.set_abbreviation + ')' : ''}</div>
+      <div class="card-number">#${data.collector_number || '?'}</div>
+      ${data.rarity ? '<div class="card-rarity">' + data.rarity + '</div>' : ''}
+      <div class="prices">
+        ${data.price_trend_eur !== null && data.price_trend_eur !== undefined ? '<div class="price-box"><div class="price-label">Trend</div><div class="price-value">' + fmtPrice(data.price_trend_eur) + '</div></div>' : ''}
+        ${data.price_from_eur !== null && data.price_from_eur !== undefined ? '<div class="price-box"><div class="price-label">From</div><div class="price-value">' + fmtPrice(data.price_from_eur) + '</div></div>' : ''}
+      </div>
+      ${buildCmLinks(data.cardmarket_url_db, data.cardmarket_url)}
+      ${data.notes ? '<div style="margin-top:12px;color:#aaa;font-size:0.85rem;">' + data.notes + '</div>' : ''}
+      <div class="match-meta">
+        <span class="gemini-badge">✨ Gemini AI</span>
+        <span>Confidence: ${(data.confidence * 100).toFixed(1)}%</span>
+      </div>
+    </div></div>`;
+
+    resultBox.innerHTML = html;
 }
 </script>
 </body>

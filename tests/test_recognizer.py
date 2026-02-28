@@ -243,11 +243,12 @@ class TestCardMarketURL:
     def test_card_url_falls_back_to_search(self):
         card = {
             "name": "Pikachu [Thunder Shock]",
-            "expansion_id": 1523,
+            "cm_expansion_id": 1523,
         }
         url = card_url(card)
         assert "Search" in url
         assert "searchString=Pikachu" in url
+        assert "idExpansion=1523" in url
 
     def test_card_url_no_expansion(self):
         card = {"name": "Unknown Card"}
@@ -259,3 +260,33 @@ class TestCardMarketURL:
         card = {"id_product": 123456}
         url = card_url(card, locale="de")
         assert "/de/Pokemon/Products?idProduct=123456" in url
+
+    def test_card_url_skips_tcgdex_placeholder_id(self):
+        card = {
+            "id_product": "tcg_jp-25426",
+            "name": "Venusaur",
+        }
+        url = card_url(card)
+        assert "Search" in url
+        assert "searchString=Venusaur" in url
+        assert "idProduct" not in url
+
+    def test_card_url_jp_uses_eng_name(self):
+        card = {
+            "name": "フシギバナ",
+            "eng_name": "Venusaur",
+            "language": "ja",
+            "cm_expansion_id": 1634,
+        }
+        url = card_url(card)
+        assert "searchString=Venusaur" in url
+        assert "idExpansion=1634" in url
+
+    def test_card_url_tw_uses_eng_name(self):
+        card = {
+            "name": "葉伊布V",
+            "eng_name": "Leafeon V",
+            "language": "zh-tw",
+        }
+        url = card_url(card)
+        assert "Leafeon" in url

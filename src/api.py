@@ -397,10 +397,8 @@ def _match_to_card(card: dict, locale: str = "en") -> SQLCardMatch:
         "name": card.get("cm_name") or card.get("name", ""),
         "eng_name": card.get("eng_name", ""),
         "language": card.get("language", "en"),
-        "expansion_id": card.get("cm_expansion_id"),
+        "cm_expansion_id": card.get("cm_expansion_id"),
         "set_id": card.get("set_id", ""),
-        "set_name": card.get("set_name", ""),
-        "abbreviation": card.get("abbreviation", ""),
         "collector_number": card.get("collector_number"),
     }
     cm_url = card_url(cm_card, locale=locale) if (cm_id or card.get("name")) else ""
@@ -597,6 +595,7 @@ class GeminiIdentifyResponse(BaseModel):
     language: str = "en"
     rarity: str = ""
     cardmarket_url: str = ""
+    cardmarket_url_db: str = ""
     price_trend_eur: Optional[float] = None
     price_from_eur: Optional[float] = None
     confidence: float = 0.0
@@ -633,6 +632,54 @@ class GeminiGradeResponse(BaseModel):
     image_quality_warning: Optional[str] = None
 
 
+def _enrich_gemini_from_db(result) -> dict | None:
+    """Try to find the Gemini-identified card in our local DB.
+
+    Searches by collector_number + set_abbreviation, then by name.
+    Returns the best matching card dict or None.
+    """
+    import re
+
+    # Parse collector number (e.g. "32/106" → number=32)
+    num_match = re.match(r"(\d+)", str(result.collector_number or ""))
+    number = int(num_match.group(1)) if num_match else None
+    abbrev = (result.set_abbreviation or "").strip()
+    name = (result.card_name_english or result.card_name or "").strip()
+
+    candidates = []
+
+    # Strategy 1: number + set abbreviation (most precise)
+    if number is not None and abbrev:
+        candidates = _matcher._query_number_and_code(number, abbrev, lang="en")
+        if not candidates:
+            # Try without lang filter
+            candidates = _matcher._query_number_and_code(number, abbrev)
+
+    # Strategy 2: number + total
+    if not candidates and number is not None:
+        total_match = re.search(r"/(\d+)", str(result.collector_number or ""))
+        if total_match:
+            total = int(total_match.group(1))
+            candidates = _matcher._query_number_and_total(number, total)
+
+    # Strategy 3: name search
+    if not candidates and name:
+        candidates = _matcher._query_by_name(name, limit=10, lang="en")
+
+    if not candidates:
+        return None
+
+    # If multiple candidates, prefer the one matching the name
+    if len(candidates) > 1 and name:
+        name_lower = name.lower()
+        for c in candidates:
+            c_name = (c.get("name") or "").lower()
+            if c_name == name_lower or name_lower in c_name:
+                return c
+
+    return candidates[0]
+
+
 @app.post("/gemini/identify", response_model=GeminiIdentifyResponse)
 async def gemini_identify(
     file: UploadFile = File(...),
@@ -664,6 +711,44 @@ async def gemini_identify(
 
     result = _gemini_identifier.identify(contents, mime_type=mime, use_search=use_search)
 
+    # Enrich with local DB data — prices, CardMarket URL, etc.
+    db_card = None
+    cm_url_gemini = result.cardmarket_url  # URL from Gemini/Google Search
+    cm_url_db = ""                          # URL from our DB
+    price_trend = result.price_trend_eur
+    price_from = result.price_from_eur
+
+    if result.success and _matcher:
+        try:
+            db_card = _enrich_gemini_from_db(result)
+        except Exception as e:
+            print(f"[Gemini] DB enrichment error: {e}")
+            db_card = None
+
+    print(f"[Gemini] db_card found: {db_card is not None}")
+    if db_card:
+        print(f"[Gemini] db_card: name={db_card.get('name')}, cm_id={db_card.get('cm_id_product')}, set={db_card.get('abbreviation')}")
+
+    if db_card:
+        cm_url_db = card_url(
+            {
+                "id_product": db_card.get("cm_id_product"),
+                "name": db_card.get("cm_name") or db_card.get("name", ""),
+                "eng_name": db_card.get("eng_name", ""),
+                "language": db_card.get("language", "en"),
+                "cm_expansion_id": db_card.get("cm_expansion_id"),
+                "set_id": db_card.get("set_id", ""),
+                "collector_number": db_card.get("collector_number"),
+            },
+            locale="en",
+        )
+        if price_trend is None:
+            price_trend = db_card.get("price_trend")
+        if price_from is None:
+            price_from = db_card.get("price_low")
+
+    print(f"[Gemini] URLs: gemini='{cm_url_gemini}' db='{cm_url_db}'")
+
     return GeminiIdentifyResponse(
         success=result.success,
         processing_time_ms=result.processing_time_ms,
@@ -676,9 +761,10 @@ async def gemini_identify(
         set_abbreviation=result.set_abbreviation,
         language=result.language,
         rarity=result.rarity,
-        cardmarket_url=result.cardmarket_url,
-        price_trend_eur=result.price_trend_eur,
-        price_from_eur=result.price_from_eur,
+        cardmarket_url=cm_url_gemini,
+        cardmarket_url_db=cm_url_db,
+        price_trend_eur=price_trend,
+        price_from_eur=price_from,
         confidence=result.confidence,
         notes=result.notes,
     )

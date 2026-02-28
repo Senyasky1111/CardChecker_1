@@ -93,31 +93,38 @@ def card_url(
         CardMarket URL (direct redirect or search).
     """
     # 1. idProduct redirect (most reliable — auto-redirects to exact product page)
+    #    Only use numeric IDs — skip tcgdex placeholders like "tcg_jp-25426"
     cm_id = card.get("cm_id_product") or card.get("id_product")
-    if cm_id:
+    if cm_id and str(cm_id).isdigit():
         return f"{CM_BASE}/{locale}/Pokemon/Products?idProduct={cm_id}"
 
     # 2. Fall back to search URL
-    #    For JP/TW cards: use eng_name + set code + collector number
-    #    e.g. "Charizard ex sv2a 006" → finds exact JP card on CardMarket
+    #    Use cm_expansion_id (CardMarket numeric ID) for filtering — NOT tcgdex set codes
     lang = card.get("language", "en")
     if lang in ("ja", "zh-tw"):
         search_name = card.get("eng_name") or card.get("name", "")
-        print(f"[cardmarket_url] JP/TW card: lang={lang}, eng_name={card.get('eng_name')!r}, name={card.get('name', '')[:20]!r} → search_name={search_name!r}")
     else:
         search_name = card.get("name", "")
     search_name = _clean_card_name(search_name)
 
-    # Append set abbreviation and collector number for precision
-    set_abbr = card.get("set_id") or card.get("abbreviation") or ""
-    col_num = card.get("collector_number")
-    if set_abbr and col_num is not None:
-        search_name = f"{search_name} {set_abbr} {col_num:03d}"
-    elif set_abbr:
-        search_name = f"{search_name} {set_abbr}"
+    # Append set code and collector number for more precise search
+    # e.g. "Charizard ex SV2a 006" narrows results better than just "Charizard ex"
+    set_id = card.get("set_id", "")
+    collector_num = card.get("collector_number")
+    if set_id and collector_num is not None:
+        # Remove language prefix (tw-, jp-) from set_id for CardMarket search
+        clean_set = re.sub(r"^(tw-|jp-)", "", set_id)
+        try:
+            num_str = f"{int(collector_num):03d}"
+        except (ValueError, TypeError):
+            num_str = str(collector_num)
+        search_name = f"{search_name} {clean_set} {num_str}"
+    elif set_id:
+        clean_set = re.sub(r"^(tw-|jp-)", "", set_id)
+        search_name = f"{search_name} {clean_set}"
 
     params: dict[str, str] = {"searchString": search_name}
-    expansion_id = card.get("expansion_id") or card.get("cm_expansion_id")
+    expansion_id = card.get("cm_expansion_id") or card.get("expansion_id")
     if expansion_id:
         params["idExpansion"] = str(expansion_id)
         params["idCategory"] = str(CM_POKEMON_SINGLES_CATEGORY)

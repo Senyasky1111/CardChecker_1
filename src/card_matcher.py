@@ -43,9 +43,10 @@ _SELECT_SQL = """
     SELECT c.*, s.name AS set_name, s.abbreviation, s.card_count_official,
            p.trend AS price_trend, p.low AS price_low, p.avg AS price_avg,
            p.foil_trend AS price_foil_trend,
-           p.cm_name, p.cm_expansion_id
+           p.cm_name,
+           COALESCE(p.cm_expansion_id, s.cm_expansion_id) AS cm_expansion_id
     FROM cards c
-    JOIN sets s ON c.set_id = s.set_id
+    JOIN sets s ON c.set_id = s.set_id AND s.language = c.language
     LEFT JOIN prices p ON c.cm_id_product = p.cm_id_product
 """
 

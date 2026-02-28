@@ -65,6 +65,23 @@ _SET_CODE_RE = re.compile(r"\b([A-Z]{2,5})\b")
 # Known set codes loaded from _set_abbreviations.json (lazy-loaded)
 _KNOWN_SET_CODES: set[str] | None = None
 
+# Known set totals loaded from DB (lazy-loaded) — used to validate OCR'd totals
+_KNOWN_SET_TOTALS: set[int] | None = None
+
+# Common OCR digit confusions (bidirectional)
+_DIGIT_SUBS: dict[str, list[str]] = {
+    "0": ["8", "6", "9"],
+    "1": ["7", "4"],
+    "2": ["7", "Z"],
+    "3": ["8", "5"],
+    "4": ["1", "9"],
+    "5": ["3", "8", "6"],
+    "6": ["0", "8", "5"],
+    "7": ["1", "2"],
+    "8": ["0", "3", "6"],
+    "9": ["0", "4"],
+}
+
 
 def _get_known_set_codes() -> set[str]:
     """Load known printed set codes for validation."""
@@ -82,6 +99,133 @@ def _get_known_set_codes() -> set[str]:
             except Exception:
                 pass
     return _KNOWN_SET_CODES
+
+
+def _get_known_set_totals() -> set[int]:
+    """Load known set card totals from DB for OCR validation.
+
+    Returns a set of all distinct set_total values from cards table
+    plus card_count_official from sets table.  Used to validate whether
+    an OCR'd total actually belongs to a real Pokemon set.
+    """
+    global _KNOWN_SET_TOTALS
+    if _KNOWN_SET_TOTALS is None:
+        _KNOWN_SET_TOTALS = set()
+        try:
+            import sqlite3
+
+            db = Path("./data/cards.db")
+            if db.exists():
+                conn = sqlite3.connect(str(db))
+                rows = conn.execute(
+                    "SELECT DISTINCT set_total FROM cards "
+                    "WHERE set_total IS NOT NULL AND set_total > 0"
+                ).fetchall()
+                _KNOWN_SET_TOTALS = {r[0] for r in rows}
+                rows = conn.execute(
+                    "SELECT DISTINCT card_count_official FROM sets "
+                    "WHERE card_count_official > 0"
+                ).fetchall()
+                _KNOWN_SET_TOTALS.update(r[0] for r in rows)
+                conn.close()
+        except Exception:
+            pass
+    return _KNOWN_SET_TOTALS
+
+
+def _try_digit_corrections(
+    parsed: CollectorNumber, known_totals: set[int]
+) -> Optional[CollectorNumber]:
+    """Try common OCR digit corrections when total doesn't match known sets.
+
+    Only called when parsed.total is NOT in known_totals.
+
+    Three strategies in order of reliability:
+    1. Trim trailing digit from total (OCR merged with adjacent text, e.g. 785 → 78)
+    2. Trim leading digit from total (e.g. 785 → 85)
+    3. Single-digit substitution in total (e.g. 785 → 185 if 7↔1 confusion)
+
+    Trim strategies are prioritised because on holographic/SAR cards OCR
+    commonly reads extra characters from neighbouring text (e.g. "078 SAR" → "0785").
+
+    For each corrected total, also attempts to correct the number part
+    to ensure it passes validation (number <= total * 2).
+    """
+    if not known_totals:
+        return None
+
+    # Guard: if total already valid, no correction needed
+    if parsed.total in known_totals:
+        return None
+
+    t_str = str(parsed.total)
+    n_str = str(parsed.number)
+
+    def _try_fix_number(new_t: int) -> Optional[CollectorNumber]:
+        """Given a corrected total, find a valid number."""
+        # Number already valid with new total?
+        if 1 <= parsed.number <= new_t * 2:
+            return CollectorNumber(
+                number=parsed.number,
+                total=new_t,
+                set_code=parsed.set_code,
+                raw=parsed.raw,
+            )
+        # Try single-digit corrections on number
+        for j, d in enumerate(n_str):
+            for r in _DIGIT_SUBS.get(d, []):
+                try:
+                    new_n = int(n_str[:j] + r + n_str[j + 1 :])
+                except ValueError:
+                    continue
+                if 1 <= new_n <= new_t * 2:
+                    return CollectorNumber(
+                        number=new_n,
+                        total=new_t,
+                        set_code=parsed.set_code,
+                        raw=parsed.raw,
+                    )
+        # Try trimming number too (same pattern — extra digit from noise)
+        if len(n_str) >= 3:
+            for trimmed_n in (parsed.number // 10, parsed.number % (10 ** (len(n_str) - 1))):
+                if 1 <= trimmed_n <= new_t * 2:
+                    return CollectorNumber(
+                        number=trimmed_n,
+                        total=new_t,
+                        set_code=parsed.set_code,
+                        raw=parsed.raw,
+                    )
+        return None
+
+    # Strategy 1: trim trailing digit (OCR merged "078S" → reads "0785")
+    if len(t_str) >= 3:
+        trimmed = parsed.total // 10
+        if trimmed in known_totals and trimmed > 0:
+            result = _try_fix_number(trimmed)
+            if result:
+                return result
+
+    # Strategy 2: trim leading digit
+    if len(t_str) >= 3:
+        trimmed = parsed.total % (10 ** (len(t_str) - 1))
+        if trimmed in known_totals and trimmed > 0:
+            result = _try_fix_number(trimmed)
+            if result:
+                return result
+
+    # Strategy 3: single-digit substitution in total (last resort)
+    for i, digit in enumerate(t_str):
+        for replacement in _DIGIT_SUBS.get(digit, []):
+            try:
+                new_t = int(t_str[:i] + replacement + t_str[i + 1 :])
+            except ValueError:
+                continue
+            if new_t in known_totals and new_t > 0:
+                result = _try_fix_number(new_t)
+                if result:
+                    return result
+
+    return None
 
 
 def detect_language(text: str) -> str:
@@ -138,6 +282,7 @@ class CardOCR:
         self._reader_configs = {
             "en_ja": ["en", "ja"],
             "en_ch": ["en", "ch_tra"],
+            "en_only": ["en"],  # For number extraction — digits & Latin only
         }
 
     def _get_reader(self, lang_key: str = "en_ja"):
@@ -453,6 +598,32 @@ class CardOCR:
     # Collector number extraction
     # ------------------------------------------------------------------
 
+    def _preprocess_clahe(
+        self, region: Image.Image, scale: int = 4
+    ) -> np.ndarray:
+        """
+        CLAHE + Otsu preprocessing — best for holographic/SAR/full-art cards.
+
+        1. Convert to grayscale
+        2. Upscale by *scale*
+        3. CLAHE contrast enhancement (cuts through holographic patterns)
+        4. Otsu binarization
+        5. Invert if mostly dark
+        """
+        gray = np.array(region.convert("L"))
+        h, w = gray.shape
+        gray = cv2.resize(
+            gray, (w * scale, h * scale), interpolation=cv2.INTER_CUBIC
+        )
+        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+        enhanced = clahe.apply(gray)
+        _, binary = cv2.threshold(
+            enhanced, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU
+        )
+        if binary.mean() < 128:
+            binary = 255 - binary
+        return binary
+
     def _extract_collector_number(
         self, card_img: Image.Image
     ) -> tuple[Optional[CollectorNumber], float]:
@@ -460,14 +631,19 @@ class CardOCR:
         Extract collector number from the bottom of the card.
 
         Multi-strategy approach for maximum reliability:
-        1. Primary: scan bands with EasyOCR (color + threshold modes)
-        2. Fallback: regex-only scan on a wide bottom strip with high upscale
-           (catches numbers that EasyOCR reads but can't structure)
+        1. Primary: scan bands with EasyOCR (color + threshold + CLAHE modes)
+           — returns IMMEDIATELY if the parsed total matches a known set total
+           — otherwise saves as best_unvalidated and keeps scanning
+        2. Fallback: wide bottom strip with CLAHE + Otsu
+        3. Last resort: digit correction on best_unvalidated result
 
-        Bands are tried in order of likelihood — most modern cards (SV era)
-        have the number at 93-97%, older cards at 87-93%.
+        Uses English-only reader for number extraction (no JP character noise).
         """
-        reader = self._get_reader()
+        reader = self._get_reader("en_only")
+        known_totals = _get_known_set_totals()
+
+        best_unvalidated: Optional[CollectorNumber] = None
+        best_unvalidated_conf: float = 0.0
 
         # Strategy 1: Band-by-band OCR with multiple preprocessing modes
         # Try scales: 4x for clean images, 6x for blurry/phone photos
@@ -475,7 +651,7 @@ class CardOCR:
             for band in CROP_NUMBER_BANDS:
                 region = self._crop_region(card_img, band)
 
-                for mode in ("color", "threshold"):
+                for mode in ("color", "threshold", "clahe"):
                     if mode == "color":
                         region_np = np.array(region.convert("RGB"))
                         h, w = region_np.shape[:2]
@@ -483,8 +659,8 @@ class CardOCR:
                             region_np, (w * scale, h * scale),
                             interpolation=cv2.INTER_CUBIC,
                         )
-                    else:
-                        # Grayscale + threshold — cuts through dark/holo backgrounds
+                    elif mode == "threshold":
+                        # Grayscale + adaptive threshold
                         region_np = self._preprocess_for_ocr(region)
                         h, w = region_np.shape[:2]
                         th_scale = max(1, scale // 2)
@@ -492,6 +668,9 @@ class CardOCR:
                             region_np, (w * th_scale, h * th_scale),
                             interpolation=cv2.INTER_CUBIC,
                         )
+                    else:
+                        # CLAHE + Otsu — best for holographic/SAR cards
+                        region_np = self._preprocess_clahe(region, scale=scale)
 
                     results = reader.readtext(region_np, detail=1, paragraph=False)
                     all_text = " ".join(text for _, text, _ in results)
@@ -505,34 +684,24 @@ class CardOCR:
 
                     parsed = self._parse_collector_number(all_text)
                     if parsed is not None:
-                        return parsed, avg_conf
+                        # Validated: total matches a known set → accept immediately
+                        if known_totals and parsed.total in known_totals:
+                            return parsed, avg_conf
+                        # Unvalidated: save best, keep scanning
+                        if best_unvalidated is None or avg_conf > best_unvalidated_conf:
+                            best_unvalidated = parsed
+                            best_unvalidated_conf = avg_conf
 
-            # Only try 6x scale if 4x failed on ALL bands
+            # Only try 6x scale if 4x found nothing validated
             if scale == 4:
                 continue
 
-        # Strategy 2: Wide bottom strip with English-only OCR
-        # Reads the full bottom 15% at high resolution — sometimes
-        # captures the number when narrow bands miss due to alignment
+        # Strategy 2: Wide bottom strip with CLAHE + Otsu
+        # Reads the full bottom 15% at high resolution
         try:
             wide_band = {"y_start": 0.87, "y_end": 1.0, "x_start": 0.0, "x_end": 1.0}
             region = self._crop_region(card_img, wide_band)
-
-            # Try with high-contrast preprocessing
-            gray = np.array(region.convert("L"))
-            h, w = gray.shape
-            gray = cv2.resize(gray, (w * 6, h * 6), interpolation=cv2.INTER_CUBIC)
-
-            # CLAHE for better contrast on varying backgrounds
-            clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
-            enhanced = clahe.apply(gray)
-
-            # Sharp threshold
-            _, binary = cv2.threshold(enhanced, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-
-            # Check if mostly dark (inverted card bottom)
-            if binary.mean() < 128:
-                binary = 255 - binary
+            binary = self._preprocess_clahe(region, scale=6)
 
             results = reader.readtext(binary, detail=1, paragraph=False)
             all_text = " ".join(text for _, text, _ in results)
@@ -542,9 +711,22 @@ class CardOCR:
                     sum(conf for _, _, conf in results) / len(results)
                     if results else 0.0
                 )
-                return parsed, avg_conf
+                if known_totals and parsed.total in known_totals:
+                    return parsed, avg_conf
+                if best_unvalidated is None or avg_conf > best_unvalidated_conf:
+                    best_unvalidated = parsed
+                    best_unvalidated_conf = avg_conf
         except Exception:
             pass
+
+        # Strategy 3: Digit correction on best unvalidated result
+        if best_unvalidated is not None and known_totals:
+            corrected = _try_digit_corrections(best_unvalidated, known_totals)
+            if corrected is not None:
+                return corrected, best_unvalidated_conf * 0.8
+
+        if best_unvalidated is not None:
+            return best_unvalidated, best_unvalidated_conf
 
         return None, 0.0
 

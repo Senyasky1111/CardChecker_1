@@ -156,6 +156,23 @@
   .method-tag.ocr_name { background: #0d47a1; color: #42a5f5; }
   .method-tag.ocr_number { background: #e65100; color: #ff9800; }
   .method-tag.clip_only { background: #4a148c; color: #ce93d8; }
+  .method-tag.gemini { background: #1a237e; color: #7c4dff; }
+
+  /* Gemini badge */
+  .gemini-badge {
+    display: inline-block; padding: 3px 10px; border-radius: 12px;
+    background: linear-gradient(135deg, #7c4dff, #448aff); color: white;
+    font-size: 0.75rem; font-weight: bold; margin-left: 8px; vertical-align: middle;
+  }
+  .gemini-section {
+    margin-top: 20px; padding: 16px; border-radius: 12px;
+    background: linear-gradient(135deg, rgba(124,77,255,0.08), rgba(68,138,255,0.08));
+    border: 1px solid rgba(124,77,255,0.3);
+  }
+  .gemini-section .card-name { color: #b388ff; }
+
+  .cm-link.cm-db { background: #1565c0; }
+  .cm-link.cm-gemini { background: #7c4dff; }
 
   .alternatives {
     margin-top: 16px; padding-top: 12px; border-top: 1px solid #333;
@@ -234,6 +251,12 @@
           Match<div class="step-time" id="step-match-time"></div>
         </div>
       </div>
+      <span class="step-arrow" id="step-gemini-arrow" style="display:none">&rarr;</span>
+      <div class="step" id="step-gemini-wrap" style="display:none">
+        <div class="step-box" id="step-gemini">
+          ✨ Gemini<div class="step-time" id="step-gemini-time"></div>
+        </div>
+      </div>
     </div>
   </div>
 
@@ -292,11 +315,33 @@ function fmtPrice(val) {
 }
 
 function resetSteps() {
-  ['detect', 'warp', 'ocr', 'match'].forEach(s => {
+  ['detect', 'warp', 'ocr', 'match', 'gemini'].forEach(s => {
     const el = document.getElementById('step-' + s);
     el.className = 'step-box';
     document.getElementById('step-' + s + '-time').textContent = '';
   });
+  // Hide gemini step by default
+  document.getElementById('step-gemini-wrap').style.display = 'none';
+  document.getElementById('step-gemini-arrow').style.display = 'none';
+}
+
+function showGeminiStep() {
+  document.getElementById('step-gemini-wrap').style.display = '';
+  document.getElementById('step-gemini-arrow').style.display = '';
+}
+
+function buildCmLinks(dbUrl, geminiUrl) {
+  const norm = (u) => u ? u.replace(/\/+$/, '').split('?')[0].toLowerCase() : '';
+  const db = dbUrl || '';
+  const gem = geminiUrl || '';
+  if (!db && !gem) return '';
+  if (db && !gem) return '<a class="cm-link cm-db" href="' + db + '" target="_blank">View on CardMarket &rarr;</a>';
+  if (!db && gem) return '<a class="cm-link cm-gemini" href="' + gem + '" target="_blank">View on CardMarket (Gemini) &rarr;</a>';
+  if (norm(db) === norm(gem)) {
+    return '<a class="cm-link cm-db" href="' + db + '" target="_blank">View on CardMarket &rarr;</a>';
+  }
+  return '<a class="cm-link cm-db" href="' + db + '" target="_blank">CardMarket (DB) &rarr;</a> '
+       + '<a class="cm-link cm-gemini" href="' + gem + '" target="_blank">CardMarket (Gemini) &rarr;</a>';
 }
 
 function setStep(name, state, timeMs) {
@@ -378,6 +423,44 @@ async function runScan() {
 
     // Show card result
     showCardResult(identifyData);
+
+    // === Step 3: Gemini fallback if needed ===
+    const needsGemini = !identifyData.success
+        || identifyData.confidence < 0.7
+        || identifyData.method === 'clip_only'
+        || (identifyData.success && identifyData.top_match && !identifyData.top_match.cardmarket_url);
+
+    if (needsGemini) {
+      showGeminiStep();
+      setStep('gemini', 'active');
+
+      try {
+        const formData3 = new FormData();
+        formData3.append('file', selectedFile);
+
+        const t3 = performance.now();
+        const geminiResp = await fetch(`${API}/gemini/identify?use_search=true`, {
+          method: 'POST', body: formData3,
+        });
+
+        if (geminiResp.ok) {
+          const geminiData = await geminiResp.json();
+          const geminiMs = performance.now() - t3;
+
+          if (geminiData.success) {
+            setStep('gemini', 'done', geminiData.processing_time_ms || geminiMs);
+            showGeminiResult(identifyData, geminiData);
+          } else {
+            setStep('gemini', 'fail', geminiData.processing_time_ms || geminiMs);
+          }
+        } else {
+          setStep('gemini', 'fail');
+        }
+      } catch (geminiErr) {
+        console.error('Gemini fallback error:', geminiErr);
+        setStep('gemini', 'fail');
+      }
+    }
 
   } catch (err) {
     errorEl.textContent = `Error: ${err.message}`;
@@ -538,6 +621,81 @@ function showCardResult(data) {
 
   box.innerHTML = html;
   box.classList.add('visible');
+}
+
+function showGeminiResult(ocrData, geminiData) {
+  const box = document.getElementById('cardResult');
+
+  // If OCR completely failed, replace with Gemini result
+  if (!ocrData.success) {
+    let html = `<div class="gemini-section">
+      <div style="margin-bottom:12px;">
+        <span class="gemini-badge">✨ GEMINI</span>
+        <span style="color:#888;font-size:0.8rem;margin-left:8px;">OCR failed — Gemini identified the card</span>
+      </div>`;
+
+    html += buildGeminiCard(geminiData);
+    html += '</div>';
+    box.innerHTML = html;
+    box.classList.add('visible');
+    return;
+  }
+
+  // OCR succeeded but low confidence or missing data — show Gemini below
+  let geminiHtml = `<div class="gemini-section">
+    <div style="margin-bottom:12px;">
+      <span class="gemini-badge">✨ GEMINI VERIFICATION</span>
+      <span style="color:#888;font-size:0.8rem;margin-left:8px;">
+        ${ocrData.method === 'clip_only' ? 'OCR failed, CLIP-only match' :
+          ocrData.confidence < 0.7 ? 'Low confidence (' + (ocrData.confidence * 100).toFixed(0) + '%)' :
+          'Missing CardMarket link'} — Gemini provided additional data
+      </span>
+    </div>`;
+  geminiHtml += buildGeminiCard(geminiData);
+  geminiHtml += '</div>';
+
+  // Append Gemini section to existing result
+  box.innerHTML += geminiHtml;
+}
+
+function buildGeminiCard(g) {
+  const name = g.card_name_english || g.card_name || 'Unknown';
+  const showOriginal = g.card_name && g.card_name_english && g.card_name !== g.card_name_english;
+
+  let html = `
+    <div class="card-name">${name}
+      ${g.language ? '<span style="font-size:0.8rem;color:#888;">[' + g.language.toUpperCase() + ']</span>' : ''}
+    </div>
+    ${showOriginal ? '<div class="card-original-name">' + g.card_name + '</div>' : ''}
+    ${g.set_name ? '<div class="card-set">' + g.set_name + (g.set_abbreviation ? ' (' + g.set_abbreviation + ')' : '') + '</div>' : ''}
+    ${g.collector_number ? '<div class="card-number">#' + g.collector_number + '</div>' : ''}
+    ${g.rarity ? '<div class="card-rarity">' + g.rarity + '</div>' : ''}
+  `;
+
+  // Prices
+  if (g.price_trend_eur || g.price_from_eur) {
+    html += `<div class="prices">`;
+    if (g.price_trend_eur) {
+      html += `<div class="price-box"><div class="price-label">Trend</div><div class="price-value">${fmtPrice(g.price_trend_eur)}</div></div>`;
+    }
+    if (g.price_from_eur) {
+      html += `<div class="price-box"><div class="price-label">From</div><div class="price-value">${fmtPrice(g.price_from_eur)}</div></div>`;
+    }
+    html += `</div>`;
+  }
+
+  // CardMarket links — dual URL support
+  html += buildCmLinks(g.cardmarket_url_db, g.cardmarket_url);
+
+  // Meta
+  html += `<div class="match-meta">
+    <span class="method-tag gemini">gemini</span>
+    <span>Confidence: ${(g.confidence * 100).toFixed(1)}%</span>
+    <span>Time: ${g.processing_time_ms.toFixed(0)}ms</span>
+    ${g.search_used ? '<span>🔍 Google Search</span>' : ''}
+  </div>`;
+
+  return html;
 }
 
 function openOverlay(src) {

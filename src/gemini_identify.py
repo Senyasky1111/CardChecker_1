@@ -198,7 +198,23 @@ class GeminiIdentifier:
             )
 
         elapsed_ms = (time.time() - t0) * 1000
-        raw_text = response.text or ""
+
+        # Extract text from response — response.text can be None with search grounding
+        raw_text = ""
+        try:
+            raw_text = response.text or ""
+        except Exception:
+            pass
+        if not raw_text:
+            # Fallback: iterate over candidate parts
+            try:
+                for cand in response.candidates:
+                    for part in cand.content.parts:
+                        if part.text:
+                            raw_text += part.text
+            except Exception:
+                pass
+        print(f"[Gemini] raw_text ({len(raw_text)} chars): {raw_text[:300]}")
 
         # Parse JSON from response
         result = self._parse_response(raw_text)

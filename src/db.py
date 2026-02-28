@@ -24,7 +24,8 @@ CREATE TABLE IF NOT EXISTS sets (
     card_count_total    INTEGER DEFAULT 0,
     release_date        TEXT DEFAULT '',
     logo_url            TEXT DEFAULT '',
-    language            TEXT DEFAULT 'en'
+    language            TEXT DEFAULT 'en',
+    cm_expansion_id     INTEGER DEFAULT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_sets_name ON sets(name);
 CREATE INDEX IF NOT EXISTS idx_sets_abbr ON sets(abbreviation);
@@ -87,6 +88,7 @@ _MIGRATIONS: list[tuple[str, bool]] = [
     ("CREATE INDEX IF NOT EXISTS idx_cards_lang_number ON cards(language, collector_number)", False),
     ("CREATE INDEX IF NOT EXISTS idx_cards_lang_total ON cards(language, collector_number, set_total)", False),
     ("CREATE INDEX IF NOT EXISTS idx_cards_lang_name ON cards(language, name_normalized)", False),
+    ("ALTER TABLE sets ADD COLUMN cm_expansion_id INTEGER DEFAULT NULL", True),
 ]
 
 
