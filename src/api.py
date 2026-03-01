@@ -404,37 +404,15 @@ def _build_tcgplayer_url(tcgplayer_id: int | None) -> str:
 
 
 def _build_pricecharting_url(card: dict) -> str:
-    """Build PriceCharting URL by formula."""
-    import re
-    name = (card.get("eng_name") or card.get("name", "")).strip()
-    if not name:
-        return ""
+    """Get PriceCharting URL — prefer stored DB value, fall back to generation."""
+    # Use stored URL from database (pre-computed by build_pricecharting_map.py)
+    stored = (card.get("pricecharting_url") or "").strip()
+    if stored:
+        return stored
 
-    lang = card.get("language", "en")
-    set_id = card.get("set_id", "")
-    number = card.get("collector_number")
-
-    # Slugify name
-    slug = re.sub(r"[^a-zA-Z0-9\s-]", "", name.lower())
-    slug = re.sub(r"\s+", "-", slug.strip())
-
-    # Add number if available
-    if number:
-        slug = f"{slug}-{number}"
-
-    # Game prefix depends on language
-    if lang == "ja":
-        game = "pokemon-japanese"
-    elif lang == "zh-tw":
-        game = "pokemon-chinese"
-    else:
-        game = "pokemon"
-
-    # Set slug
-    set_slug = re.sub(r"[^a-zA-Z0-9\s-]", "", set_id.lower())
-    set_slug = re.sub(r"\s+", "-", set_slug.strip())
-
-    return f"https://www.pricecharting.com/game/{game}-{set_slug}/{slug}" if set_slug else ""
+    # Fallback: generate on-the-fly for cards not yet in DB
+    from scripts.build_pricecharting_map import build_pricecharting_url
+    return build_pricecharting_url(card)
 
 
 def _get_enriched_prices(tcgdex_id: str) -> dict:
@@ -718,6 +696,7 @@ async def get_card_prices(tcgdex_id: str):
     card = conn.execute("""
         SELECT c.tcgdex_id, c.name, c.eng_name, c.language, c.set_id,
                c.cm_id_product, c.tcgplayer_id, c.has_graded,
+               c.collector_number, c.pricecharting_url,
                s.name as set_name, s.abbreviation
         FROM cards c
         LEFT JOIN sets s ON c.set_id = s.set_id AND s.language = c.language
