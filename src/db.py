@@ -2,9 +2,12 @@
 SQLite database for Pokemon card data.
 
 Tables:
-    sets   — one row per set (EN from TCGdex, JP from pokemon-card.com, TW from asia.pokemon-card.com)
-    cards  — one row per card, multi-language (EN/JA/ZH-TW)
-    prices — CardMarket pricing (linked by cm_id_product)
+    sets              — one row per set (EN from TCGdex, JP from pokemon-card.com, TW from asia.pokemon-card.com)
+    cards             — one row per card, multi-language (EN/JA/ZH-TW)
+    prices            — CardMarket pricing (linked by cm_id_product)
+    card_external_ids — marketplace ID mappings (PokeTrace, TCGPlayer, Pokemon-API)
+    prices_external   — multi-source price snapshots (PokeTrace, Pokemon-API)
+    enrichment_runs   — track enrichment script progress for resumability
 """
 
 from __future__ import annotations
@@ -74,6 +77,56 @@ CREATE TABLE IF NOT EXISTS prices (
     foil_low        REAL DEFAULT 0,
     updated_at      TEXT DEFAULT ''
 );
+
+-- External marketplace ID mappings (PokeTrace, TCGPlayer, Pokemon-API)
+CREATE TABLE IF NOT EXISTS card_external_ids (
+    tcgdex_id        TEXT PRIMARY KEY REFERENCES cards(tcgdex_id),
+    poketrace_id     TEXT,
+    tcgplayer_id     INTEGER,
+    pokemon_api_id   INTEGER,
+    poketrace_set_slug TEXT DEFAULT '',
+    matched_at       TEXT DEFAULT '',
+    match_method     TEXT DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_ext_tcgplayer ON card_external_ids(tcgplayer_id);
+CREATE INDEX IF NOT EXISTS idx_ext_poketrace ON card_external_ids(poketrace_id);
+
+-- Multi-source price snapshots (daily snapshots from PokeTrace + Pokemon-API)
+CREATE TABLE IF NOT EXISTS prices_external (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    tcgdex_id       TEXT NOT NULL REFERENCES cards(tcgdex_id),
+    source          TEXT NOT NULL,
+    marketplace     TEXT NOT NULL,
+    condition       TEXT NOT NULL,
+    country         TEXT DEFAULT 'ALL',
+    currency        TEXT NOT NULL,
+    price_avg       REAL,
+    price_low       REAL,
+    price_high      REAL,
+    price_trend     TEXT DEFAULT '',
+    avg_1d          REAL,
+    avg_7d          REAL,
+    avg_30d         REAL,
+    sale_count      INTEGER,
+    confidence      TEXT DEFAULT '',
+    snapshot_date   TEXT NOT NULL,
+    updated_at      TEXT NOT NULL,
+    UNIQUE(tcgdex_id, source, marketplace, condition, country, snapshot_date)
+);
+CREATE INDEX IF NOT EXISTS idx_pe_card ON prices_external(tcgdex_id);
+CREATE INDEX IF NOT EXISTS idx_pe_lookup ON prices_external(tcgdex_id, marketplace, condition);
+
+-- Track enrichment script progress for resumability
+CREATE TABLE IF NOT EXISTS enrichment_runs (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    phase           TEXT NOT NULL,
+    started_at      TEXT DEFAULT '',
+    completed_at    TEXT DEFAULT '',
+    last_offset     TEXT DEFAULT '',
+    cards_processed INTEGER DEFAULT 0,
+    cards_total     INTEGER,
+    status          TEXT DEFAULT 'running'
+);
 """
 
 # Migration steps: (sql, can_fail)
@@ -89,6 +142,12 @@ _MIGRATIONS: list[tuple[str, bool]] = [
     ("CREATE INDEX IF NOT EXISTS idx_cards_lang_total ON cards(language, collector_number, set_total)", False),
     ("CREATE INDEX IF NOT EXISTS idx_cards_lang_name ON cards(language, name_normalized)", False),
     ("ALTER TABLE sets ADD COLUMN cm_expansion_id INTEGER DEFAULT NULL", True),
+    # Phase 2: External API enrichment columns
+    ("ALTER TABLE cards ADD COLUMN tcgplayer_id INTEGER DEFAULT NULL", True),
+    ("ALTER TABLE cards ADD COLUMN top_price_eur REAL DEFAULT NULL", True),
+    ("ALTER TABLE cards ADD COLUMN top_price_usd REAL DEFAULT NULL", True),
+    ("ALTER TABLE cards ADD COLUMN has_graded INTEGER DEFAULT 0", True),
+    ("ALTER TABLE cards ADD COLUMN enriched_at TEXT DEFAULT ''", True),
 ]
 
 

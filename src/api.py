@@ -182,6 +182,16 @@ class SQLCardMatch(BaseModel):
     price_foil_trend: Optional[float] = None
     image_url: str = ""
     cardmarket_url: str = ""
+    # New enriched fields
+    tcgplayer_id: Optional[int] = None
+    tcgplayer_url: str = ""
+    pricecharting_url: str = ""
+    price_usd: Optional[float] = None
+    price_ebay_usd: Optional[float] = None
+    graded_psa10: Optional[float] = None
+    graded_psa9: Optional[float] = None
+    graded_cgc10: Optional[float] = None
+    has_graded: bool = False
 
 
 class IdentifyV2Response(BaseModel):
@@ -386,12 +396,91 @@ async def detect_number(
     )
 
 
+def _build_tcgplayer_url(tcgplayer_id: int | None) -> str:
+    """Build TCGPlayer product URL."""
+    if not tcgplayer_id:
+        return ""
+    return f"https://www.tcgplayer.com/product/{tcgplayer_id}"
+
+
+def _build_pricecharting_url(card: dict) -> str:
+    """Build PriceCharting URL by formula."""
+    import re
+    name = (card.get("eng_name") or card.get("name", "")).strip()
+    if not name:
+        return ""
+
+    lang = card.get("language", "en")
+    set_id = card.get("set_id", "")
+    number = card.get("collector_number")
+
+    # Slugify name
+    slug = re.sub(r"[^a-zA-Z0-9\s-]", "", name.lower())
+    slug = re.sub(r"\s+", "-", slug.strip())
+
+    # Add number if available
+    if number:
+        slug = f"{slug}-{number}"
+
+    # Game prefix depends on language
+    if lang == "ja":
+        game = "pokemon-japanese"
+    elif lang == "zh-tw":
+        game = "pokemon-chinese"
+    else:
+        game = "pokemon"
+
+    # Set slug
+    set_slug = re.sub(r"[^a-zA-Z0-9\s-]", "", set_id.lower())
+    set_slug = re.sub(r"\s+", "-", set_slug.strip())
+
+    return f"https://www.pricecharting.com/game/{game}-{set_slug}/{slug}" if set_slug else ""
+
+
+def _get_enriched_prices(tcgdex_id: str) -> dict:
+    """Fetch enriched price data for a card from prices_external."""
+    if not _matcher:
+        return {}
+
+    conn = _matcher.conn
+    result = {}
+
+    # TCGPlayer USD price (latest)
+    row = conn.execute("""
+        SELECT price_avg FROM prices_external
+        WHERE tcgdex_id = ? AND marketplace = 'tcgplayer' AND condition = 'NEAR_MINT'
+        ORDER BY snapshot_date DESC LIMIT 1
+    """, (tcgdex_id,)).fetchone()
+    if row and row["price_avg"]:
+        result["price_usd"] = row["price_avg"]
+
+    # eBay USD price (latest NM)
+    row = conn.execute("""
+        SELECT price_avg FROM prices_external
+        WHERE tcgdex_id = ? AND marketplace = 'ebay' AND condition IN ('NEAR_MINT', 'AGGREGATED')
+        ORDER BY snapshot_date DESC LIMIT 1
+    """, (tcgdex_id,)).fetchone()
+    if row and row["price_avg"]:
+        result["price_ebay_usd"] = row["price_avg"]
+
+    # Graded prices
+    for grade_key, condition in [("graded_psa10", "PSA_10"), ("graded_psa9", "PSA_9"), ("graded_cgc10", "CGC_10")]:
+        row = conn.execute("""
+            SELECT price_avg FROM prices_external
+            WHERE tcgdex_id = ? AND condition = ?
+            ORDER BY snapshot_date DESC LIMIT 1
+        """, (tcgdex_id, condition)).fetchone()
+        if row and row["price_avg"]:
+            result[grade_key] = row["price_avg"]
+
+    return result
+
+
 def _match_to_card(card: dict, locale: str = "en") -> SQLCardMatch:
     """Convert a CardMatcher result dict to an API response model."""
     cm_id = card.get("cm_id_product")
 
     # Build CardMarket URL using existing cardmarket_url module
-    # Priority: idProduct redirect → search fallback (with eng_name for JP/TW)
     cm_card = {
         "id_product": cm_id,
         "name": card.get("cm_name") or card.get("name", ""),
@@ -403,8 +492,19 @@ def _match_to_card(card: dict, locale: str = "en") -> SQLCardMatch:
     }
     cm_url = card_url(cm_card, locale=locale) if (cm_id or card.get("name")) else ""
 
+    # TCGPlayer ID
+    tcgplayer_id = card.get("tcgplayer_id")
+    tcgplayer_url = _build_tcgplayer_url(tcgplayer_id)
+
+    # PriceCharting URL
+    pc_url = _build_pricecharting_url(card)
+
+    # Enriched prices from prices_external
+    tcgdex_id = card.get("tcgdex_id", "")
+    enriched = _get_enriched_prices(tcgdex_id) if tcgdex_id else {}
+
     return SQLCardMatch(
-        tcgdex_id=card.get("tcgdex_id", ""),
+        tcgdex_id=tcgdex_id,
         name=card.get("name", ""),
         eng_name=card.get("eng_name", ""),
         language=card.get("language", "en"),
@@ -421,6 +521,15 @@ def _match_to_card(card: dict, locale: str = "en") -> SQLCardMatch:
         price_foil_trend=card.get("price_foil_trend"),
         image_url=card.get("image_url", ""),
         cardmarket_url=cm_url,
+        tcgplayer_id=tcgplayer_id,
+        tcgplayer_url=tcgplayer_url,
+        pricecharting_url=pc_url,
+        price_usd=enriched.get("price_usd"),
+        price_ebay_usd=enriched.get("price_ebay_usd"),
+        graded_psa10=enriched.get("graded_psa10"),
+        graded_psa9=enriched.get("graded_psa9"),
+        graded_cgc10=enriched.get("graded_cgc10"),
+        has_graded=card.get("has_graded", 0) == 1,
     )
 
 
@@ -574,6 +683,128 @@ async def get_card(
         price_foil_trend=card.get("price_foil_trend", 0),
         cardmarket_url=card_url(card, locale=locale),
         cardmarket_urls=urls,
+    )
+
+
+# ------------------------------------------------------------------
+# Price detail endpoint
+# ------------------------------------------------------------------
+
+class PriceDetail(BaseModel):
+    """Full multi-source pricing for a card."""
+    tcgdex_id: str
+    name: str = ""
+    set_name: str = ""
+    language: str = "en"
+    cardmarket: dict = {}
+    tcgplayer: dict = {}
+    ebay: dict = {}
+    graded: dict = {}
+    links: dict = {}
+    last_updated: str = ""
+
+
+@app.get("/card/{tcgdex_id}/prices", response_model=PriceDetail)
+async def get_card_prices(tcgdex_id: str):
+    """Get full multi-source pricing data for a card.
+
+    Returns prices from CardMarket, TCGPlayer, eBay, and graded sales
+    with country-level detail (DE, FR, ES, IT) where available.
+    """
+    matcher = _get_matcher()
+    conn = matcher.conn
+
+    # Get card info
+    card = conn.execute("""
+        SELECT c.tcgdex_id, c.name, c.eng_name, c.language, c.set_id,
+               c.cm_id_product, c.tcgplayer_id, c.has_graded,
+               s.name as set_name, s.abbreviation
+        FROM cards c
+        LEFT JOIN sets s ON c.set_id = s.set_id AND s.language = c.language
+        WHERE c.tcgdex_id = ?
+    """, (tcgdex_id,)).fetchone()
+
+    if not card:
+        raise HTTPException(status_code=404, detail="Card not found")
+
+    # Get all price rows
+    prices = conn.execute("""
+        SELECT source, marketplace, condition, country, currency,
+               price_avg, price_low, price_high, price_trend,
+               avg_1d, avg_7d, avg_30d, sale_count, confidence,
+               snapshot_date, updated_at
+        FROM prices_external
+        WHERE tcgdex_id = ?
+        ORDER BY snapshot_date DESC
+    """, (tcgdex_id,)).fetchall()
+
+    # Organize by marketplace
+    cardmarket = {}
+    tcgplayer = {}
+    ebay = {}
+    graded = {}
+    last_updated = ""
+
+    for p in prices:
+        mp = p["marketplace"]
+        cond = p["condition"]
+        country = p["country"]
+        updated = p["updated_at"] or ""
+        if updated > last_updated:
+            last_updated = updated
+
+        price_data = {
+            "avg": p["price_avg"],
+            "low": p["price_low"],
+            "high": p["price_high"],
+            "trend": p["price_trend"],
+            "avg_7d": p["avg_7d"],
+            "avg_30d": p["avg_30d"],
+            "sale_count": p["sale_count"],
+            "currency": p["currency"],
+            "date": p["snapshot_date"],
+        }
+        # Remove None values
+        price_data = {k: v for k, v in price_data.items() if v is not None}
+
+        # Graded conditions
+        if cond.startswith(("PSA_", "BGS_", "CGC_", "SGC_", "ACE_", "TAG_")):
+            graded[cond.lower()] = price_data
+            continue
+
+        if mp in ("cardmarket", "cardmarket_unsold"):
+            key = f"{cond}_{country}".lower() if country != "ALL" else cond.lower()
+            cardmarket[key] = price_data
+
+        elif mp == "tcgplayer":
+            tcgplayer[cond.lower()] = price_data
+
+        elif mp == "ebay":
+            ebay[cond.lower()] = price_data
+
+    # Build links
+    links = {}
+    cm_id = card["cm_id_product"]
+    if cm_id:
+        links["cardmarket"] = f"https://www.cardmarket.com/en/Pokemon/Products/Singles?idProduct={cm_id}"
+    tcg_id = card["tcgplayer_id"]
+    if tcg_id:
+        links["tcgplayer"] = f"https://www.tcgplayer.com/product/{tcg_id}"
+    pc_url = _build_pricecharting_url(dict(card))
+    if pc_url:
+        links["pricecharting"] = pc_url
+
+    return PriceDetail(
+        tcgdex_id=tcgdex_id,
+        name=card["name"] or card["eng_name"] or "",
+        set_name=card["set_name"] or "",
+        language=card["language"],
+        cardmarket=cardmarket,
+        tcgplayer=tcgplayer,
+        ebay=ebay,
+        graded=graded,
+        links=links,
+        last_updated=last_updated,
     )
 
 
