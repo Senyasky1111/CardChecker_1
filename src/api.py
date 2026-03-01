@@ -20,6 +20,13 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Optional
 
+# Load .env file (API keys for Gemini, etc.)
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass  # python-dotenv not installed, rely on system env vars
+
 import uvicorn
 from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware

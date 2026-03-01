@@ -133,12 +133,14 @@ class CardMatcher:
 
         # Debug logging for troubleshooting misidentifications
         _cn = ocr_result.collector_number
-        print(f"[match] OCR name={ocr_result.name!r}, "
+        _name_safe = (ocr_result.name or "").encode("ascii", errors="replace").decode()
+        _raw_safe = (_cn.raw[:80] if _cn and _cn.raw else "").encode("ascii", errors="replace").decode()
+        print(f"[match] OCR name={_name_safe!r}, "
               f"number={_cn.number if _cn else None}/{_cn.total if _cn else None}, "
               f"set_code={_cn.set_code if _cn else None}, "
               f"num_conf={ocr_result.number_confidence:.2f}, "
               f"lang={ocr_result.detected_language}, "
-              f"raw={_cn.raw[:80] if _cn and _cn.raw else None!r}")
+              f"raw={_raw_safe!r}")
 
         # Step 2: SQL lookup (language-aware)
         candidates = self._sql_lookup(ocr_result)
