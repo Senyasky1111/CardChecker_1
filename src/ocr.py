@@ -3,7 +3,7 @@ OCR module for Pokemon card text extraction.
 
 Extracts card name and collector number from a card photo using:
 1. OpenCV for card boundary detection and perspective correction
-2. EasyOCR for text recognition on cropped regions
+2. Tesseract (primary, ~30-80ms) or EasyOCR (fallback) for text recognition
 
 The card layout has consistent regions:
 - Name: top banner (2-10% height, 5-77% width)
@@ -15,7 +15,9 @@ The card layout has consistent regions:
 from __future__ import annotations
 
 import json
+import os
 import re
+import shutil
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -24,6 +26,39 @@ from typing import Optional
 import cv2
 import numpy as np
 from PIL import Image
+
+# ---------------------------------------------------------------------------
+# Tesseract availability check (done once at import)
+# ---------------------------------------------------------------------------
+_TESSERACT_CMD: str | None = None
+
+
+def _find_tesseract() -> str | None:
+    """Find tesseract binary. Checks common Windows install paths."""
+    global _TESSERACT_CMD
+    if _TESSERACT_CMD is not None:
+        return _TESSERACT_CMD if _TESSERACT_CMD != "" else None
+
+    # 1. On PATH?
+    if shutil.which("tesseract"):
+        _TESSERACT_CMD = "tesseract"
+        return _TESSERACT_CMD
+
+    # 2. Common Windows install locations
+    candidates = [
+        Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "Tesseract-OCR" / "tesseract.exe",
+        Path(os.environ.get("USERPROFILE", "")) / "Desktop" / "Tesseract-OCR" / "tesseract.exe",
+        Path(r"C:\Program Files\Tesseract-OCR\tesseract.exe"),
+        Path(r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe"),
+        Path(os.environ.get("USERPROFILE", "")) / "AppData" / "Local" / "Tesseract-OCR" / "tesseract.exe",
+    ]
+    for p in candidates:
+        if p.exists():
+            _TESSERACT_CMD = str(p)
+            return _TESSERACT_CMD
+
+    _TESSERACT_CMD = ""  # Cache "not found"
+    return None
 
 # Canonical card size for perspective correction (matches dataset images)
 CARD_W = 600
@@ -71,6 +106,9 @@ CROP_NUMBER_BANDS = [
 # Matches: "057/191", "57 / 191", "057/191 SSP", "SVI EN 057/191"
 _NUMBER_RE = re.compile(r"(\d{1,4})\s*/\s*(\d{1,4})")
 _SET_CODE_RE = re.compile(r"\b([A-Z]{2,5})\b")
+# Catches mixed-case set codes like "Sv10", "SV10", "sv10" from OCR
+# Groups: prefix (letters) + suffix (digits, optional)
+_SET_CODE_MIXED_RE = re.compile(r"\b([A-Za-z]{1,3}\d{1,3})\b")
 
 # Known set codes loaded from _set_abbreviations.json (lazy-loaded)
 _KNOWN_SET_CODES: set[str] | None = None
@@ -662,102 +700,131 @@ class CardOCR:
             binary = 255 - binary
         return binary
 
+    # ------------------------------------------------------------------
+    # OCR backends for collector number (Tesseract = fast, EasyOCR = fallback)
+    # ------------------------------------------------------------------
+
+    def _ocr_number_tesseract(self, region_np: np.ndarray) -> str:
+        """Run Tesseract on a preprocessed numpy image. Returns raw text.
+
+        Uses PSM 6 (uniform text block) — handles mixed text where
+        the number NNN/NNN appears among other text. The caller parses
+        the number out using regex.
+        """
+        import pytesseract
+
+        tess_cmd = _find_tesseract()
+        if tess_cmd is None:
+            raise RuntimeError("Tesseract not found")
+        pytesseract.pytesseract.tesseract_cmd = tess_cmd
+
+        config = r"--oem 3 --psm 6"
+        text = pytesseract.image_to_string(region_np, config=config)
+        return text.strip()
+
+    def _ocr_number_easyocr(self, region_np: np.ndarray) -> tuple[str, float]:
+        """Run EasyOCR on a preprocessed numpy image. Returns (text, confidence)."""
+        reader = self._get_reader("en_only")
+        results = reader.readtext(region_np, detail=1, paragraph=False)
+        all_text = " ".join(text for _, text, _ in results)
+        avg_conf = (
+            sum(conf for _, _, conf in results) / len(results)
+            if results else 0.0
+        )
+        return all_text, avg_conf
+
+    # ------------------------------------------------------------------
+    # Preprocessing methods for collector number
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _preprocess_color(region: Image.Image, scale: int = 4) -> np.ndarray:
+        """Color image upscaled — best general-purpose for Tesseract."""
+        rgb = np.array(region.convert("RGB"))
+        h, w = rgb.shape[:2]
+        return cv2.resize(rgb, (w * scale, h * scale), interpolation=cv2.INTER_CUBIC)
+
+    @staticmethod
+    def _preprocess_sharpen(region: Image.Image, scale: int = 4) -> np.ndarray:
+        """Grayscale + sharpen — good for faint text on light backgrounds."""
+        gray = np.array(region.convert("L"))
+        h, w = gray.shape
+        gray = cv2.resize(gray, (w * scale, h * scale), interpolation=cv2.INTER_CUBIC)
+        kernel = np.array([[-1, -1, -1], [-1, 9, -1], [-1, -1, -1]])
+        return cv2.filter2D(gray, -1, kernel)
+
+    # ------------------------------------------------------------------
+    # Fast collector number extraction
+    # ------------------------------------------------------------------
+
     def _extract_collector_number(
         self, card_img: Image.Image
     ) -> tuple[Optional[CollectorNumber], float]:
         """
         Extract collector number from the bottom of the card.
 
-        Multi-strategy approach for maximum reliability:
-        1. Primary: scan bands with EasyOCR (color + threshold + CLAHE modes)
-           — returns IMMEDIATELY if the parsed total matches a known set total
-           — otherwise saves as best_unvalidated and keeps scanning
-        2. Fallback: wide bottom strip with CLAHE + Otsu
-        3. Last resort: digit correction on best_unvalidated result
+        Optimized pipeline — uses Tesseract (if available) with multiple
+        preprocessing methods, then falls back to EasyOCR.
 
-        Uses English-only reader for number extraction (no JP character noise).
+        Speed comparison:
+        - Old approach: 6 bands × 2 scales × 3 modes = 36 EasyOCR calls → 47s
+        - Tesseract path: 1-3 calls × ~200ms = 0.2-0.6s
+        - EasyOCR fallback: 1-2 calls × ~1.5s = 1.5-3.0s
         """
-        reader = self._get_reader("en_only")
         known_totals = _get_known_set_totals()
+        use_tesseract = _find_tesseract() is not None
 
         best_unvalidated: Optional[CollectorNumber] = None
         best_unvalidated_conf: float = 0.0
 
-        # Strategy 1: Band-by-band OCR with multiple preprocessing modes
-        # Try scales: 4x for clean images, 6x for blurry/phone photos
-        for scale in (4, 6):
-            for band in CROP_NUMBER_BANDS:
-                region = self._crop_region(card_img, band)
+        # Full-width bottom strip — captures collector number regardless of era
+        BOTTOM_CROP = {"y_start": 0.90, "y_end": 1.00, "x_start": 0.0, "x_end": 1.0}
+        region = self._crop_region(card_img, BOTTOM_CROP)
 
-                for mode in ("color", "threshold", "clahe"):
-                    if mode == "color":
-                        region_np = np.array(region.convert("RGB"))
-                        h, w = region_np.shape[:2]
-                        region_np = cv2.resize(
-                            region_np, (w * scale, h * scale),
-                            interpolation=cv2.INTER_CUBIC,
-                        )
-                    elif mode == "threshold":
-                        # Grayscale + adaptive threshold
-                        region_np = self._preprocess_for_ocr(region)
-                        h, w = region_np.shape[:2]
-                        th_scale = max(1, scale // 2)
-                        region_np = cv2.resize(
-                            region_np, (w * th_scale, h * th_scale),
-                            interpolation=cv2.INTER_CUBIC,
-                        )
-                    else:
-                        # CLAHE + Otsu — best for holographic/SAR cards
-                        region_np = self._preprocess_clahe(region, scale=scale)
-
-                    results = reader.readtext(region_np, detail=1, paragraph=False)
-                    all_text = " ".join(text for _, text, _ in results)
-                    avg_conf = (
-                        sum(conf for _, _, conf in results) / len(results)
-                        if results else 0.0
-                    )
-
-                    if mode == "threshold" and avg_conf < 0.25:
-                        continue
-
-                    parsed = self._parse_collector_number(all_text)
-                    if parsed is not None:
-                        # Validated: total matches a known set → accept immediately
-                        if known_totals and parsed.total in known_totals:
-                            return parsed, avg_conf
-                        # Unvalidated: save best, keep scanning
-                        if best_unvalidated is None or avg_conf > best_unvalidated_conf:
-                            best_unvalidated = parsed
-                            best_unvalidated_conf = avg_conf
-
-            # Only try 6x scale if 4x found nothing validated
-            if scale == 4:
-                continue
-
-        # Strategy 2: Wide bottom strip with CLAHE + Otsu
-        # Reads the full bottom 15% at high resolution
-        try:
-            wide_band = {"y_start": 0.87, "y_end": 1.0, "x_start": 0.0, "x_end": 1.0}
-            region = self._crop_region(card_img, wide_band)
-            binary = self._preprocess_clahe(region, scale=6)
-
-            results = reader.readtext(binary, detail=1, paragraph=False)
-            all_text = " ".join(text for _, text, _ in results)
-            parsed = self._parse_collector_number(all_text)
+        def _try_result(text: str, conf: float) -> bool:
+            """Check if text contains valid collector number. Returns True to stop."""
+            nonlocal best_unvalidated, best_unvalidated_conf
+            parsed = self._parse_collector_number(text)
             if parsed is not None:
-                avg_conf = (
-                    sum(conf for _, _, conf in results) / len(results)
-                    if results else 0.0
-                )
                 if known_totals and parsed.total in known_totals:
-                    return parsed, avg_conf
-                if best_unvalidated is None or avg_conf > best_unvalidated_conf:
+                    return True  # Signal: validated match found
+                if best_unvalidated is None or conf > best_unvalidated_conf:
                     best_unvalidated = parsed
-                    best_unvalidated_conf = avg_conf
-        except Exception:
-            pass
+                    best_unvalidated_conf = conf
+            return False
 
-        # Strategy 3: Digit correction on best unvalidated result
+        # Strategy 1: Tesseract with multiple preprocessing methods (~200-600ms)
+        if use_tesseract:
+            preprocess_fns = [
+                (self._preprocess_color, 4),      # Best general-purpose
+                (self._preprocess_sharpen, 4),     # Good for faint text
+                (self._preprocess_clahe, 4),       # Good for holographic/SAR
+            ]
+            for fn, scale in preprocess_fns:
+                try:
+                    processed = fn(region, scale=scale)
+                    text = self._ocr_number_tesseract(processed)
+                    if _try_result(text, 0.85):
+                        return self._parse_collector_number(text), 0.85
+                except Exception:
+                    continue
+
+            # If Tesseract found an unvalidated result, return it
+            if best_unvalidated is not None:
+                if known_totals:
+                    corrected = _try_digit_corrections(best_unvalidated, known_totals)
+                    if corrected is not None:
+                        return corrected, best_unvalidated_conf * 0.8
+                return best_unvalidated, best_unvalidated_conf
+
+        # Strategy 2: EasyOCR on single wide crop — color upscaled (~1.5s)
+        # Color image works best with EasyOCR (unlike Tesseract which prefers binary)
+        color_img = self._preprocess_color(region, scale=4)
+        text, conf = self._ocr_number_easyocr(color_img)
+        if _try_result(text, conf):
+            return self._parse_collector_number(text), conf
+
+        # Digit correction on best unvalidated result
         if best_unvalidated is not None and known_totals:
             corrected = _try_digit_corrections(best_unvalidated, known_totals)
             if corrected is not None:
@@ -847,7 +914,19 @@ class CardOCR:
                 if set_code:
                     break
 
-        # Strategy 3: Fallback to first non-skip code (original behavior)
+        # Strategy 3: Try mixed-case set codes (e.g. "Sv10", "sv10", "SV10")
+        # OCR often misreads case on holographic/SR cards.
+        # Runs BEFORE generic fallback because a known code is more trustworthy
+        # than an unknown uppercase word like "TXUD".
+        if set_code is None:
+            mixed_matches = _SET_CODE_MIXED_RE.findall(cleaned)
+            for mixed in mixed_matches:
+                upper_mixed = mixed.upper()
+                if upper_mixed in known_codes and upper_mixed not in skip:
+                    set_code = upper_mixed
+                    break
+
+        # Strategy 4: Fallback to first non-skip uppercase code (original behavior)
         if set_code is None:
             for code in code_matches:
                 if code not in skip and len(code) >= 2:

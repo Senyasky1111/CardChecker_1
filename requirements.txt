@@ -10,6 +10,7 @@ opencv-python-headless>=4.8.0
 
 # OCR & text matching
 easyocr>=1.7.0
+pytesseract>=0.3.10  # Fast number OCR (requires Tesseract binary installed)
 rapidfuzz>=3.0.0
 
 # Data
