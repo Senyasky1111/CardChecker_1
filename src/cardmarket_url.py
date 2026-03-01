@@ -93,14 +93,15 @@ def card_url(
         CardMarket URL (direct redirect or search).
     """
     # 1. idProduct redirect (most reliable — auto-redirects to exact product page)
-    #    Only use numeric IDs — skip tcgdex placeholders like "tcg_jp-25426"
+    #    Only use for EN cards — JP/TW cm_id_product is inherited from EN by name
+    #    matching and may point to a different card from a different set.
+    lang = card.get("language", "en")
     cm_id = card.get("cm_id_product") or card.get("id_product")
-    if cm_id and str(cm_id).isdigit():
+    if cm_id and str(cm_id).isdigit() and lang == "en":
         return f"{CM_BASE}/{locale}/Pokemon/Products?idProduct={cm_id}"
 
     # 2. Fall back to search URL
     #    Use cm_expansion_id (CardMarket numeric ID) for filtering — NOT tcgdex set codes
-    lang = card.get("language", "en")
     if lang in ("ja", "zh-tw"):
         search_name = card.get("eng_name") or card.get("name", "")
     else:
@@ -124,10 +125,13 @@ def card_url(
         search_name = f"{search_name} {clean_set}"
 
     params: dict[str, str] = {"searchString": search_name}
-    expansion_id = card.get("cm_expansion_id") or card.get("expansion_id")
-    if expansion_id:
-        params["idExpansion"] = str(expansion_id)
-        params["idCategory"] = str(CM_POKEMON_SINGLES_CATEGORY)
+    # Only use cm_expansion_id for EN cards — for JP/TW it's inherited from EN
+    # products and would incorrectly filter results to the wrong set
+    if lang == "en":
+        expansion_id = card.get("cm_expansion_id") or card.get("expansion_id")
+        if expansion_id:
+            params["idExpansion"] = str(expansion_id)
+            params["idCategory"] = str(CM_POKEMON_SINGLES_CATEGORY)
 
     query = urllib.parse.urlencode(params)
     return f"{CM_BASE}/{locale}/Pokemon/Products/Search?{query}"
