@@ -105,6 +105,8 @@ CROP_NUMBER_BANDS = [
 # Regex patterns for collector number
 # Matches: "057/191", "57 / 191", "057/191 SSP", "SVI EN 057/191"
 _NUMBER_RE = re.compile(r"(\d{1,4})\s*/\s*(\d{1,4})")
+# Old-era format: "#212", "# 064", "#64" (Base Set, Neo, e-Card, EX, DP, Platinum, HGSS, BW)
+_HASH_NUMBER_RE = re.compile(r"#\s*(\d{1,4})")
 _SET_CODE_RE = re.compile(r"\b([A-Z]{2,5})\b")
 # Catches mixed-case set codes like "Sv10", "SV10", "sv10" from OCR
 # Groups: prefix (letters) + suffix (digits, optional)
@@ -200,6 +202,10 @@ def _try_digit_corrections(
     to ensure it passes validation (number <= total * 2).
     """
     if not known_totals:
+        return None
+
+    # Guard: if total is None (#NNN format), nothing to correct
+    if parsed.total is None:
         return None
 
     # Guard: if total already valid, no correction needed
@@ -824,6 +830,20 @@ class CardOCR:
         if _try_result(text, conf):
             return self._parse_collector_number(text), conf
 
+        # Strategy 3: Tighter right-bottom crop — catches old-era cards where
+        # the number sits in the bottom-right corner and full-width crop has
+        # too much noise (flavor text, copyright) for OCR to parse.
+        if use_tesseract and best_unvalidated is None:
+            RIGHT_BOTTOM = {"y_start": 0.93, "y_end": 1.00, "x_start": 0.50, "x_end": 1.0}
+            right_region = self._crop_region(card_img, RIGHT_BOTTOM)
+            try:
+                processed = self._preprocess_color(right_region, scale=4)
+                text = self._ocr_number_tesseract(processed)
+                if _try_result(text, 0.75):
+                    return self._parse_collector_number(text), 0.75
+            except Exception:
+                pass
+
         # Digit correction on best unvalidated result
         if best_unvalidated is not None and known_totals:
             corrected = _try_digit_corrections(best_unvalidated, known_totals)
@@ -855,6 +875,9 @@ class CardOCR:
         cleaned = re.sub(r"(?<=\d)[oO](?=\d)", "0", cleaned)
         cleaned = re.sub(r"(?<=\d)[oO](?=/)", "0", cleaned)
         cleaned = re.sub(r"(?<=/)[oO](?=\d)", "0", cleaned)
+        # "i" → "1" when between digits (EasyOCR confuses "1" with "i")
+        # e.g. "42i90" → "42190" which then gets recovered as "42/90"
+        cleaned = re.sub(r"(?<=\d)i(?=\d)", "1", cleaned)
         # "[01/102" → "101/102", "[0/108" → "100/108" — EasyOCR reads "[" for "1" on old cards
         # Special case: "[0/" likely means "100/" (lost both digits)
         cleaned = re.sub(r"\[0/", "100/", cleaned)
@@ -865,6 +888,30 @@ class CardOCR:
 
         # Find ALL matches and pick the last valid one
         matches = list(_NUMBER_RE.finditer(cleaned))
+        if not matches:
+            # Last-resort: OCR may read "/" as "1" merging the number into a
+            # single digit string like "42190" for "42/90". Try splitting
+            # 4-6 digit sequences at each "1" to recover the pattern.
+            _MERGED_RE = re.compile(r"\b(\d{4,7})\b")
+            for mg in _MERGED_RE.finditer(cleaned):
+                s = mg.group(1)
+                for i in range(2, len(s) - 1):
+                    if s[i] == "1":
+                        left, right = s[:i], s[i + 1 :]
+                        if left and right:
+                            try:
+                                n, t = int(left), int(right)
+                            except ValueError:
+                                continue
+                            if 1 <= n <= t * 2 and 1 <= t <= 999:
+                                # Inject a "/" and re-run normal parsing
+                                patched = cleaned[: mg.start()] + f"{n}/{t}" + cleaned[mg.end() :]
+                                matches = list(_NUMBER_RE.finditer(patched))
+                                if matches:
+                                    cleaned = patched
+                                    break
+                if matches:
+                    break
         if not matches:
             return None
 
@@ -885,6 +932,29 @@ class CardOCR:
                 break
 
         if m is None:
+            # Fallback: try #NNN format (old-era cards)
+            hash_matches = list(_HASH_NUMBER_RE.finditer(cleaned))
+            if hash_matches:
+                # Pick the last valid #NNN match
+                for candidate in reversed(hash_matches):
+                    n = int(candidate.group(1))
+                    if 1 <= n <= 999:
+                        # Extract set code from surrounding text
+                        set_code = None
+                        known_codes = _get_known_set_codes()
+                        code_matches = _SET_CODE_RE.findall(cleaned)
+                        _skip = {"HP", "EX", "GX", "EN", "JP", "DE", "FR",
+                                 "IT", "ES", "PT", "RGB", "PNG", "THE", "AND", "FOR"}
+                        for code in code_matches:
+                            if code in known_codes and code not in _skip:
+                                set_code = code
+                                break
+                        return CollectorNumber(
+                            number=n,
+                            total=None,
+                            set_code=set_code,
+                            raw=raw,
+                        )
             return None
 
         # Look for set code (2-5 uppercase letters)

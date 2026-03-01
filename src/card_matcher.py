@@ -131,6 +131,15 @@ class CardMatcher:
             result.ocr_number = f"{cn.number}/{cn.total}" if cn.total else str(cn.number)
         result.detected_language = ocr_result.detected_language
 
+        # Debug logging for troubleshooting misidentifications
+        _cn = ocr_result.collector_number
+        print(f"[match] OCR name={ocr_result.name!r}, "
+              f"number={_cn.number if _cn else None}/{_cn.total if _cn else None}, "
+              f"set_code={_cn.set_code if _cn else None}, "
+              f"num_conf={ocr_result.number_confidence:.2f}, "
+              f"lang={ocr_result.detected_language}, "
+              f"raw={_cn.raw[:80] if _cn and _cn.raw else None!r}")
+
         # Step 2: SQL lookup (language-aware)
         candidates = self._sql_lookup(ocr_result)
         used_clip_fallback = False
@@ -198,7 +207,27 @@ class CardMatcher:
             result.method = "ocr_number"
             result.card = reranked[0]
             result.candidates = reranked
-            result.confidence = 0.7 if self._recognizer else 0.6
+
+            # Confidence depends on how trustworthy the number-only match is.
+            # When OCR name is None (can't read card text), this is risky —
+            # the number might be garbage from holographic/SR cards.
+            # Low confidence forces frontend to fall back to Gemini Vision AI.
+            cn = ocr_result.collector_number
+            num_conf = ocr_result.number_confidence
+            n_sets = len(set(c.get("set_id", "") for c in candidates))
+
+            if num_conf < 0.5:
+                # Very low OCR confidence on number — likely garbage
+                result.confidence = 0.35
+            elif n_sets > 1:
+                # Multiple sets matched — ambiguous
+                result.confidence = 0.45
+            elif len(candidates) == 1:
+                # Single match — moderately trustworthy
+                result.confidence = 0.7 if self._recognizer else 0.6
+            else:
+                # Multiple candidates in same set — use CLIP
+                result.confidence = 0.55 if self._recognizer else 0.45
 
         result.processing_time_ms = (time.time() - t0) * 1000
         return result
