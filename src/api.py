@@ -396,11 +396,17 @@ async def detect_number(
     )
 
 
-def _build_tcgplayer_url(tcgplayer_id: int | None) -> str:
-    """Build TCGPlayer product URL."""
-    if not tcgplayer_id:
-        return ""
-    return f"https://www.tcgplayer.com/product/{tcgplayer_id}"
+def _build_tcgplayer_url(tcgplayer_id: int | None, card: dict | None = None) -> str:
+    """Get TCGPlayer URL — prefer stored DB value, fall back to product ID."""
+    # Use stored URL from database (pre-computed by fill_tcgplayer_ids.py)
+    if card:
+        stored = (card.get("tcgplayer_url") or "").strip()
+        if stored:
+            return stored
+    # Fallback: direct product link
+    if tcgplayer_id:
+        return f"https://www.tcgplayer.com/product/{tcgplayer_id}"
+    return ""
 
 
 def _build_pricecharting_url(card: dict) -> str:
@@ -472,7 +478,7 @@ def _match_to_card(card: dict, locale: str = "en") -> SQLCardMatch:
 
     # TCGPlayer ID
     tcgplayer_id = card.get("tcgplayer_id")
-    tcgplayer_url = _build_tcgplayer_url(tcgplayer_id)
+    tcgplayer_url = _build_tcgplayer_url(tcgplayer_id, card)
 
     # PriceCharting URL
     pc_url = _build_pricecharting_url(card)
@@ -696,7 +702,7 @@ async def get_card_prices(tcgdex_id: str):
     card = conn.execute("""
         SELECT c.tcgdex_id, c.name, c.eng_name, c.language, c.set_id,
                c.cm_id_product, c.tcgplayer_id, c.has_graded,
-               c.collector_number, c.pricecharting_url,
+               c.collector_number, c.pricecharting_url, c.tcgplayer_url,
                s.name as set_name, s.abbreviation
         FROM cards c
         LEFT JOIN sets s ON c.set_id = s.set_id AND s.language = c.language
@@ -767,8 +773,9 @@ async def get_card_prices(tcgdex_id: str):
     if cm_id:
         links["cardmarket"] = f"https://www.cardmarket.com/en/Pokemon/Products/Singles?idProduct={cm_id}"
     tcg_id = card["tcgplayer_id"]
-    if tcg_id:
-        links["tcgplayer"] = f"https://www.tcgplayer.com/product/{tcg_id}"
+    tcg_url = _build_tcgplayer_url(tcg_id, dict(card))
+    if tcg_url:
+        links["tcgplayer"] = tcg_url
     pc_url = _build_pricecharting_url(dict(card))
     if pc_url:
         links["pricecharting"] = pc_url
