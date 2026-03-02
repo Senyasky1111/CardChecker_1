@@ -824,6 +824,18 @@ class GeminiIdentifyResponse(BaseModel):
     price_from_eur: Optional[float] = None
     confidence: float = 0.0
     notes: str = ""
+    # Enriched fields from local DB (for multi-source pricing)
+    tcgdex_id: str = ""
+    tcgplayer_url: str = ""
+    pricecharting_url: str = ""
+    price_usd: Optional[float] = None
+    price_ebay_usd: Optional[float] = None
+    graded_psa10: Optional[float] = None
+    graded_psa9: Optional[float] = None
+    graded_cgc10: Optional[float] = None
+    has_graded: bool = False
+    price_avg: Optional[float] = None
+    price_foil_trend: Optional[float] = None
 
 
 class GeminiPillarScoreResponse(BaseModel):
@@ -973,6 +985,35 @@ async def gemini_identify(
 
     print(f"[Gemini] URLs: gemini='{cm_url_gemini}' db='{cm_url_db}'")
 
+    # Enrich with multi-source prices if we found the card in DB
+    tcgdex_id = ""
+    tcgplayer_url = ""
+    pc_url = ""
+    price_usd = None
+    price_ebay_usd = None
+    graded_psa10 = None
+    graded_psa9 = None
+    graded_cgc10 = None
+    has_graded = False
+    price_avg = None
+    price_foil_trend = None
+
+    if db_card:
+        tcgdex_id = db_card.get("tcgdex_id", "")
+        tcgplayer_url = _build_tcgplayer_url(db_card.get("tcgplayer_id"), db_card)
+        pc_url = _build_pricecharting_url(db_card)
+        price_avg = db_card.get("price_avg")
+        price_foil_trend = db_card.get("price_foil_trend")
+        has_graded = db_card.get("has_graded", 0) == 1
+
+        if tcgdex_id:
+            enriched = _get_enriched_prices(tcgdex_id)
+            price_usd = enriched.get("price_usd")
+            price_ebay_usd = enriched.get("price_ebay_usd")
+            graded_psa10 = enriched.get("graded_psa10")
+            graded_psa9 = enriched.get("graded_psa9")
+            graded_cgc10 = enriched.get("graded_cgc10")
+
     return GeminiIdentifyResponse(
         success=result.success,
         processing_time_ms=result.processing_time_ms,
@@ -991,6 +1032,18 @@ async def gemini_identify(
         price_from_eur=price_from,
         confidence=result.confidence,
         notes=result.notes,
+        # Enriched fields from local DB
+        tcgdex_id=tcgdex_id,
+        tcgplayer_url=tcgplayer_url,
+        pricecharting_url=pc_url,
+        price_usd=price_usd,
+        price_ebay_usd=price_ebay_usd,
+        graded_psa10=graded_psa10,
+        graded_psa9=graded_psa9,
+        graded_cgc10=graded_cgc10,
+        has_graded=has_graded,
+        price_avg=price_avg,
+        price_foil_trend=price_foil_trend,
     )
 
 
