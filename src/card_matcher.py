@@ -122,8 +122,22 @@ class CardMatcher:
         detection = self.detector.detect(image)
         card_image = detection.warped if detection.warped else image
 
-        # Step 1: OCR (on the corrected card image, skipping OCR's own detection)
+        # Step 1: OCR — try warped image first, fall back to original if
+        # the warp lost the collector number (common on already-cropped
+        # database thumbnails where YOLO corners clip the edges).
         ocr_result = self.ocr.extract(card_image)
+
+        if (
+            detection.card_found
+            and detection.warped is not None
+            and ocr_result.number_confidence < 0.5
+        ):
+            ocr_original = self.ocr.extract(image)
+            if ocr_original.number_confidence > ocr_result.number_confidence:
+                ocr_result = ocr_original
+                # Keep warped image for CLIP (perspective-corrected is still
+                # better for visual matching), but use OCR from original.
+
         if ocr_result.name:
             result.ocr_name = ocr_result.name
         if ocr_result.collector_number:

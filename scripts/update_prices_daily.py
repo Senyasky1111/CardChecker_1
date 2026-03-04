@@ -1,27 +1,32 @@
 """
 Daily price update script.
 
-Refreshes prices from PokeTrace and Pokemon-API within daily rate limits.
-Prioritizes high-value and stale cards.
+Refreshes ALL card prices from PokeTrace, Pokemon-API, and CardMarket CSV.
+Updates every card in the database — no prioritization needed since we fit
+within daily API limits (~6.5K PokeTrace + ~170 Pokemon-API requests).
 
 Usage:
-    python scripts/update_prices_daily.py [--dry-run] [--poketrace-only] [--pokemon-api-only]
+    python scripts/update_prices_daily.py [--dry-run] [--poketrace-only] [--pokemon-api-only] [--csv-only]
 
 Schedule (Windows Task Scheduler or cron):
-    # Daily at 3:00 AM UTC
-    0 3 * * * cd /path/to/CardRecognition && ./venv/Scripts/python.exe scripts/update_prices_daily.py
+    # Daily at 6:00 AM
+    0 6 * * * cd /path/to/CardRecognition && ./venv/Scripts/python.exe scripts/update_prices_daily.py
 """
 
 from __future__ import annotations
 
 import argparse
+import json
+import os
 import sys
+import io
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 
 import requests
 
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from src.config import (
     POKETRACE_API_KEY, POKETRACE_BASE_URL, POKETRACE_BURST_DELAY,
@@ -32,10 +37,9 @@ from src.db import ensure_schema
 TODAY = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 NOW = datetime.now(timezone.utc).isoformat()
 
-# PokeTrace: 10,000 req/day, allocate 8,000 for daily refresh
-POKETRACE_DAILY_BUDGET = 8000
-# Pokemon-API: 15,000 req/day via RapidAPI, allocate 3,000
-POKEMON_API_DAILY_BUDGET = 3000
+# Safety limits (hard stop if exceeded)
+PT_LIMIT = 9500       # PokeTrace: 10K/day, leave 500 buffer
+PA_LIMIT = 3000       # Pokemon-API: 15K/day via RapidAPI
 
 # -- PokeTrace session --
 pt_session = requests.Session()
@@ -55,6 +59,8 @@ pa_calls = 0
 def pt_get(endpoint, params=None, retries=3):
     """PokeTrace GET with rate limit."""
     global pt_calls
+    if pt_calls >= PT_LIMIT:
+        return None
     for attempt in range(retries):
         try:
             time.sleep(POKETRACE_BURST_DELAY)
@@ -78,6 +84,8 @@ def pt_get(endpoint, params=None, retries=3):
 def pa_get(endpoint, params=None, retries=3):
     """Pokemon-API GET with rate limit."""
     global pa_calls
+    if pa_calls >= PA_LIMIT:
+        return None
     base = "https://pokemon-tcg-api.p.rapidapi.com"
     for attempt in range(retries):
         try:
@@ -99,62 +107,35 @@ def pa_get(endpoint, params=None, retries=3):
     return None
 
 
-def update_poketrace(conn, dry_run=False):
-    """Update prices from PokeTrace, prioritizing high-value and stale cards."""
-    print("\n=== PokeTrace Daily Update ===")
+# ── Step 1: PokeTrace Bulk — ALL cards with cm_id_product ────────────
 
-    # Priority 1: Top 5000 cards by price (most valuable)
-    top_cards = conn.execute("""
+def update_poketrace_bulk(conn, dry_run=False):
+    """Refresh prices for ALL cards that have cm_id_product via bulk lookup."""
+    print("\n=== Step 1: PokeTrace Bulk — ALL cards with CM ID ===")
+
+    all_cards = conn.execute("""
         SELECT tcgdex_id, cm_id_product FROM cards
         WHERE cm_id_product IS NOT NULL AND cm_id_product > 0
-        ORDER BY COALESCE(top_price_eur, 0) + COALESCE(top_price_usd, 0) DESC
-        LIMIT 5000
+        ORDER BY cm_id_product
     """).fetchall()
 
-    # Priority 2: Cards with stale prices (>7 days)
-    stale_cards = conn.execute("""
-        SELECT c.tcgdex_id, c.cm_id_product FROM cards c
-        WHERE c.cm_id_product IS NOT NULL AND c.cm_id_product > 0
-        AND (c.enriched_at IS NULL OR c.enriched_at = ''
-             OR c.enriched_at < datetime('now', '-7 days'))
-        AND c.tcgdex_id NOT IN (SELECT tcgdex_id FROM cards
-            ORDER BY COALESCE(top_price_eur, 0) + COALESCE(top_price_usd, 0) DESC LIMIT 5000)
-        ORDER BY c.enriched_at ASC
-        LIMIT 3000
-    """).fetchall()
-
-    # Combine and deduplicate
-    seen = set()
-    all_cards = []
-    for r in list(top_cards) + list(stale_cards):
-        if r["tcgdex_id"] not in seen:
-            seen.add(r["tcgdex_id"])
-            all_cards.append(r)
-
-    # Budget check
     batch_size = 20
-    max_batches = POKETRACE_DAILY_BUDGET // 2  # EU + US = 2 calls per batch
-    max_cards = max_batches * batch_size
-    all_cards = all_cards[:max_cards]
-
-    est_requests = (len(all_cards) + batch_size - 1) // batch_size * 2
-    print(f"  Cards to update: {len(all_cards)}")
+    est_requests = (len(all_cards) + batch_size - 1) // batch_size * 2  # EU + US
+    print(f"  Cards: {len(all_cards)}")
     print(f"  Estimated requests: ~{est_requests}")
 
     if dry_run:
         print("  [DRY RUN] skipping")
         return
 
-    # Build mapping
     cm_to_tcg = {str(r["cm_id_product"]): r["tcgdex_id"] for r in all_cards}
     cm_ids = list(cm_to_tcg.keys())
-
     matched = 0
     price_rows = 0
 
     for i in range(0, len(cm_ids), batch_size):
-        if pt_calls >= POKETRACE_DAILY_BUDGET:
-            print(f"  Budget exhausted at {pt_calls} calls")
+        if pt_calls >= PT_LIMIT:
+            print(f"  API limit reached at {pt_calls} calls")
             break
 
         batch = cm_ids[i:i + batch_size]
@@ -168,7 +149,7 @@ def update_poketrace(conn, dry_run=False):
                 tcgdex_id = cm_to_tcg.get(cm_id)
                 if not tcgdex_id:
                     continue
-                prices = card.get("prices", {})
+                prices = card.get("prices") or {}
                 for marketplace, tiers in prices.items():
                     if not isinstance(tiers, dict):
                         continue
@@ -184,10 +165,17 @@ def update_poketrace(conn, dry_run=False):
                                     _save_price(conn, tcgdex_id, "poketrace", marketplace, condition, cc, "EUR", ct)
                                     price_rows += 1
 
-                # Update enriched_at
                 top_eur = _best_price(prices, "cardmarket")
-                conn.execute("""UPDATE cards SET top_price_eur = COALESCE(?, top_price_eur), enriched_at = ?
-                                WHERE tcgdex_id = ?""", (top_eur, NOW, tcgdex_id))
+                has_graded = 1 if any(
+                    cond.startswith(("PSA_", "BGS_", "CGC_", "SGC_"))
+                    for mp_tiers in prices.values() if isinstance(mp_tiers, dict)
+                    for cond in mp_tiers.keys()
+                ) else 0
+                conn.execute("""UPDATE cards SET
+                    top_price_eur = COALESCE(?, top_price_eur),
+                    has_graded = ?,
+                    enriched_at = ?
+                    WHERE tcgdex_id = ?""", (top_eur, has_graded, NOW, tcgdex_id))
                 matched += 1
 
         # US market
@@ -202,7 +190,7 @@ def update_poketrace(conn, dry_run=False):
                 tcg_id = refs.get("tcgplayerId")
                 if tcg_id:
                     conn.execute("UPDATE cards SET tcgplayer_id = ? WHERE tcgdex_id = ?", (tcg_id, tcgdex_id))
-                prices = card.get("prices", {})
+                prices = card.get("prices") or {}
                 for marketplace, tiers in prices.items():
                     if not isinstance(tiers, dict):
                         continue
@@ -215,17 +203,113 @@ def update_poketrace(conn, dry_run=False):
                 if top_usd:
                     conn.execute("UPDATE cards SET top_price_usd = ? WHERE tcgdex_id = ?", (top_usd, tcgdex_id))
 
-        if (i // batch_size + 1) % 100 == 0:
+        batch_num = i // batch_size + 1
+        total_batches = (len(cm_ids) + batch_size - 1) // batch_size
+        if batch_num % 100 == 0 or batch_num == total_batches:
             conn.commit()
-            print(f"  Progress: {i + batch_size}/{len(cm_ids)} | matched: {matched} | prices: {price_rows}")
+            print(f"  Progress: {min(i + batch_size, len(cm_ids))}/{len(cm_ids)} | matched: {matched} | prices: {price_rows} | API: {pt_calls}")
 
     conn.commit()
-    print(f"  Done: matched {matched} | price rows: {price_rows} | API calls: {pt_calls}")
+    print(f"  Done: matched {matched}/{len(all_cards)} | price rows: {price_rows} | API calls: {pt_calls}")
 
+
+# ── Step 2: PokeTrace Search — ALL cards WITHOUT cm_id_product ───────
+
+def update_poketrace_search(conn, dry_run=False):
+    """Refresh prices for ALL cards without cm_id_product via search."""
+    print("\n=== Step 2: PokeTrace Search — ALL cards without CM ID ===")
+
+    cards = conn.execute("""
+        SELECT c.tcgdex_id, c.name, c.eng_name, c.collector_number, c.language
+        FROM cards c
+        WHERE (c.cm_id_product IS NULL OR c.cm_id_product = 0)
+        AND c.eng_name IS NOT NULL AND c.eng_name != ''
+        ORDER BY c.language, c.set_id, c.collector_number
+    """).fetchall()
+
+    print(f"  Cards: {len(cards)}")
+    print(f"  Estimated requests: ~{len(cards)}")
+
+    if dry_run:
+        print("  [DRY RUN] skipping")
+        return
+
+    matched = 0
+    price_rows = 0
+    new_cm_ids = 0
+
+    for idx, card in enumerate(cards):
+        if pt_calls >= PT_LIMIT:
+            print(f"  API limit reached at {pt_calls} calls")
+            break
+
+        lang = card["language"]
+        game = "pokemon-japanese" if lang in ("ja", "zh-tw") else "pokemon"
+        params = {"game": game, "search": card["eng_name"], "limit": 5}
+        if card["collector_number"]:
+            params["card_number"] = str(card["collector_number"])
+
+        data = pt_get("/cards", params)
+        if not data or "data" not in data or not data["data"]:
+            continue
+
+        # Match by card number
+        best = None
+        for api_card in data["data"]:
+            card_num = api_card.get("cardNumber", "")
+            if card_num and card["collector_number"] and str(card["collector_number"]) in str(card_num):
+                best = api_card
+                break
+        if not best:
+            best = data["data"][0]
+
+        # Save prices
+        prices = best.get("prices") or {}
+        for marketplace, tiers in prices.items():
+            if not isinstance(tiers, dict):
+                continue
+            for condition, tier in tiers.items():
+                if not isinstance(tier, dict):
+                    continue
+                countries = tier.pop("country", None)
+                _save_price(conn, card["tcgdex_id"], "poketrace", marketplace, condition, "ALL", "EUR", tier)
+                price_rows += 1
+                if countries and isinstance(countries, dict):
+                    for cc, ct in countries.items():
+                        if isinstance(ct, dict):
+                            _save_price(conn, card["tcgdex_id"], "poketrace", marketplace, condition, cc, "EUR", ct)
+                            price_rows += 1
+
+        top_eur = _best_price(prices, "cardmarket")
+        top_usd = _best_price(prices, "tcgplayer") or _best_price(prices, "ebay")
+        conn.execute("""UPDATE cards SET
+            top_price_eur = COALESCE(?, top_price_eur),
+            top_price_usd = COALESCE(?, top_price_usd),
+            enriched_at = ? WHERE tcgdex_id = ?""",
+            (top_eur, top_usd, NOW, card["tcgdex_id"]))
+
+        # Fill cm_id_product if found
+        cm_id = best.get("refs", {}).get("cardmarketId")
+        if cm_id:
+            conn.execute("UPDATE cards SET cm_id_product = ? WHERE tcgdex_id = ?",
+                         (cm_id, card["tcgdex_id"]))
+            new_cm_ids += 1
+
+        matched += 1
+
+        if (idx + 1) % 200 == 0:
+            conn.commit()
+            print(f"  Progress: {idx + 1}/{len(cards)} | matched: {matched} | new CM IDs: {new_cm_ids} | API: {pt_calls}")
+
+    conn.commit()
+    print(f"  Done: matched {matched}/{len(cards)} | price rows: {price_rows} | new CM IDs: {new_cm_ids}")
+
+
+# ── Step 3: Pokemon-API — ALL episodes ───────────────────────────────
 
 def update_pokemon_api(conn, dry_run=False):
-    """Update country-specific prices from Pokemon-API.com."""
-    print("\n=== Pokemon-API Daily Update ===")
+    """Update country-specific prices from Pokemon-API.com for ALL sets."""
+    print("\n=== Step 3: Pokemon-API — ALL episodes ===")
 
     # Fetch all episodes
     all_eps = []
@@ -280,8 +364,8 @@ def update_pokemon_api(conn, dry_run=False):
     total_prices = 0
 
     for idx, (ep, set_id) in enumerate(matched_eps):
-        if pa_calls >= POKEMON_API_DAILY_BUDGET:
-            print(f"  Budget exhausted at {pa_calls} calls")
+        if pa_calls >= PA_LIMIT:
+            print(f"  API limit reached at {pa_calls} calls")
             break
 
         cards_data = pa_get(f"/episodes/{ep['id']}/cards")
@@ -312,7 +396,7 @@ def update_pokemon_api(conn, dry_run=False):
             if not tcgdex_id:
                 continue
 
-            prices = card.get("prices", {})
+            prices = card.get("prices") or {}
             cm = prices.get("cardmarket", {})
             if cm and isinstance(cm, dict):
                 if cm.get("lowest_near_mint"):
@@ -332,6 +416,22 @@ def update_pokemon_api(conn, dry_run=False):
                     _save_price(conn, tcgdex_id, "pokemon_api", "tcgplayer", "NEAR_MINT", "ALL", "USD", {"avg": market})
                     total_prices += 1
 
+            # Graded prices
+            psa = prices.get("psa", {})
+            if psa and isinstance(psa, dict):
+                for grade_key, grade_cond in [("psa10", "PSA_10"), ("psa9", "PSA_9")]:
+                    val = psa.get(grade_key)
+                    if val:
+                        _save_price(conn, tcgdex_id, "pokemon_api", "cardmarket", grade_cond, "ALL", "EUR", {"avg": val})
+                        total_prices += 1
+
+            cgc = prices.get("cgc", {})
+            if cgc and isinstance(cgc, dict):
+                val = cgc.get("cgc10")
+                if val:
+                    _save_price(conn, tcgdex_id, "pokemon_api", "cardmarket", "CGC_10", "ALL", "EUR", {"avg": val})
+                    total_prices += 1
+
             total_matched += 1
 
         conn.commit()
@@ -339,6 +439,101 @@ def update_pokemon_api(conn, dry_run=False):
     conn.commit()
     print(f"  Done: matched {total_matched} | price rows: {total_prices} | API calls: {pa_calls}")
 
+
+# ── Step 4: CardMarket CSV Refresh ───────────────────────────────────
+
+def update_from_csv(conn, dry_run=False):
+    """Refresh prices from CardMarket CSV if a recent file exists."""
+    print("\n=== Step 4: CardMarket CSV Refresh ===")
+
+    csv_path = Path("data/cardmarket/cards_with_prices.json")
+    if not csv_path.exists():
+        print("  [SKIP] cards_with_prices.json not found")
+        return
+
+    mtime = datetime.fromtimestamp(os.path.getmtime(csv_path), tz=timezone.utc)
+    age_days = (datetime.now(timezone.utc) - mtime).days
+    print(f"  CSV file age: {age_days} days (modified: {mtime.strftime('%Y-%m-%d %H:%M')})")
+
+    if age_days > 30:
+        print("  [SKIP] CSV too old (>30 days). Download fresh from CardMarket.")
+        return
+
+    with open(csv_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    products = data["cards"]
+    by_id = {p["id_product"]: p for p in products}
+    print(f"  CSV products: {len(by_id)}")
+
+    if dry_run:
+        print("  [DRY RUN] skipping")
+        return
+
+    # Update ALL EN cards with cm_id from CSV
+    cards = conn.execute("""
+        SELECT tcgdex_id, cm_id_product FROM cards
+        WHERE cm_id_product IS NOT NULL AND cm_id_product > 0
+        AND language = 'en'
+    """).fetchall()
+
+    updated = 0
+    for card in cards:
+        p = by_id.get(card["cm_id_product"])
+        if not p:
+            continue
+
+        trend = p.get("price_trend") or 0
+        avg = p.get("price_avg") or 0
+        low = p.get("price_low") or 0
+        best_price = trend or avg or low
+        if best_price <= 0:
+            continue
+
+        conn.execute("""
+            INSERT OR REPLACE INTO prices_external
+            (tcgdex_id, source, marketplace, condition, country, currency,
+             price_avg, price_low, price_trend, avg_7d, avg_30d,
+             snapshot_date, updated_at)
+            VALUES (?, 'cardmarket_csv', 'cardmarket', 'AGGREGATED', 'ALL', 'EUR',
+                    ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            card["tcgdex_id"],
+            avg or None, low or None, str(trend) if trend else "",
+            p.get("price_avg7"), p.get("price_avg30"),
+            TODAY, NOW,
+        ))
+
+        # Foil prices
+        foil_trend = p.get("price_foil_trend") or 0
+        foil_low = p.get("price_foil_low") or 0
+        if foil_trend > 0 or foil_low > 0:
+            conn.execute("""
+                INSERT OR REPLACE INTO prices_external
+                (tcgdex_id, source, marketplace, condition, country, currency,
+                 price_avg, price_low, price_trend,
+                 snapshot_date, updated_at)
+                VALUES (?, 'cardmarket_csv', 'cardmarket', 'FOIL', 'ALL', 'EUR',
+                        NULL, ?, ?, ?, ?)
+            """, (
+                card["tcgdex_id"],
+                foil_low or None, str(foil_trend) if foil_trend else "",
+                TODAY, NOW,
+            ))
+
+        # Fill top_price_eur if missing
+        conn.execute("""
+            UPDATE cards SET top_price_eur = ?
+            WHERE tcgdex_id = ? AND (top_price_eur IS NULL OR top_price_eur = 0)
+        """, (best_price, card["tcgdex_id"]))
+
+        updated += 1
+
+    conn.commit()
+    print(f"  Updated: {updated} cards from CSV")
+
+
+# ── Helpers ──────────────────────────────────────────────────────────
 
 def _save_price(conn, tcgdex_id, source, marketplace, condition, country, currency, tier):
     """Insert/replace a single price row."""
@@ -374,42 +569,71 @@ def _best_price(prices, marketplace):
     return None
 
 
+def _print_stats(conn, label=""):
+    """Print current DB stats."""
+    if label:
+        print(f"\n=== {label} ===")
+    for lang, lbl in [("en", "EN"), ("ja", "JP"), ("zh-tw", "TW")]:
+        total = conn.execute("SELECT COUNT(*) FROM cards WHERE language=?", (lang,)).fetchone()[0]
+        has_eur = conn.execute("SELECT COUNT(*) FROM cards WHERE language=? AND top_price_eur > 0", (lang,)).fetchone()[0]
+        has_usd = conn.execute("SELECT COUNT(*) FROM cards WHERE language=? AND top_price_usd > 0", (lang,)).fetchone()[0]
+        with_cm = conn.execute("SELECT COUNT(*) FROM cards WHERE language=? AND cm_id_product IS NOT NULL AND cm_id_product > 0", (lang,)).fetchone()[0]
+        print(f"  {lbl}: {total} total | EUR: {has_eur} ({100*has_eur/total:.0f}%) | USD: {has_usd} | CM: {with_cm}")
+
+    pe = conn.execute("SELECT COUNT(*) FROM prices_external").fetchone()[0]
+    print(f"  prices_external: {pe} rows")
+
+
+# ── Main ─────────────────────────────────────────────────────────────
+
 def main():
-    parser = argparse.ArgumentParser(description="Daily price update")
+    parser = argparse.ArgumentParser(description="Daily price update — ALL cards")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--poketrace-only", action="store_true")
     parser.add_argument("--pokemon-api-only", action="store_true")
+    parser.add_argument("--csv-only", action="store_true")
     args = parser.parse_args()
 
-    print(f"Daily Price Update | {TODAY}")
-    conn = ensure_schema()
+    run_all = not (args.poketrace_only or args.pokemon_api_only or args.csv_only)
 
-    # Stats before
-    pe = conn.execute("SELECT COUNT(*) FROM prices_external").fetchone()[0]
-    print(f"  Price rows before: {pe}")
+    print(f"=== Daily Price Update | {TODAY} ===")
+    conn = ensure_schema()
+    _print_stats(conn, "Before")
 
     t0 = time.time()
 
-    if not args.pokemon_api_only:
-        if POKETRACE_API_KEY:
-            update_poketrace(conn, dry_run=args.dry_run)
-        else:
-            print("  [SKIP] POKETRACE_API_KEY not set")
+    # Step 1: PokeTrace Bulk (all cards with cm_id)
+    if (run_all or args.poketrace_only) and POKETRACE_API_KEY:
+        update_poketrace_bulk(conn, dry_run=args.dry_run)
+    elif run_all and not POKETRACE_API_KEY:
+        print("\n  [SKIP] POKETRACE_API_KEY not set")
 
-    if not args.poketrace_only:
-        if POKEMON_API_RAPIDAPI_KEY:
-            update_pokemon_api(conn, dry_run=args.dry_run)
-        else:
-            print("  [SKIP] POKEMON_API_RAPIDAPI_KEY not set")
+    # Step 2: PokeTrace Search (all cards without cm_id)
+    if (run_all or args.poketrace_only) and POKETRACE_API_KEY:
+        update_poketrace_search(conn, dry_run=args.dry_run)
+
+    # Step 3: Pokemon-API (all episodes)
+    if (run_all or args.pokemon_api_only) and POKEMON_API_RAPIDAPI_KEY:
+        update_pokemon_api(conn, dry_run=args.dry_run)
+    elif run_all and not POKEMON_API_RAPIDAPI_KEY:
+        print("\n  [SKIP] POKEMON_API_RAPIDAPI_KEY not set")
+
+    # Step 4: CSV Refresh
+    if run_all or args.csv_only:
+        update_from_csv(conn, dry_run=args.dry_run)
 
     elapsed = time.time() - t0
 
-    # Stats after
-    pe_after = conn.execute("SELECT COUNT(*) FROM prices_external").fetchone()[0]
-    print(f"\n=== Daily Update Complete in {elapsed:.0f}s ===")
-    print(f"  Price rows: {pe} -> {pe_after} (+{pe_after - pe})")
-    print(f"  PokeTrace calls: {pt_calls}")
-    print(f"  Pokemon-API calls: {pa_calls}")
+    _print_stats(conn, "After")
+    print(f"\n=== Complete in {elapsed:.0f}s | PT: {pt_calls} calls | PA: {pa_calls} calls ===")
+
+    # Log run
+    if not args.dry_run:
+        conn.execute("""
+            INSERT INTO enrichment_runs (phase, started_at, completed_at, cards_processed, status)
+            VALUES ('daily_update', ?, ?, ?, 'completed')
+        """, (datetime.fromtimestamp(t0, tz=timezone.utc).isoformat(), NOW, pt_calls + pa_calls))
+        conn.commit()
 
     conn.close()
 

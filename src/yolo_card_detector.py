@@ -146,6 +146,12 @@ class YOLOCardDetector:
         # Order corners consistently
         ordered = order_corners(corners)
 
+        # Expand corners slightly outward to avoid cropping card edges.
+        # YOLO keypoints tend to land a few pixels inside the true boundary,
+        # which cuts off the collector-number strip at the bottom.
+        ordered = self._expand_corners(ordered, margin_pct=0.02,
+                                       img_w=orig_w, img_h=orig_h)
+
         # Warp to canonical card image
         warped = warp_card(img_rgb, ordered)
 
@@ -338,6 +344,39 @@ class YOLOCardDetector:
         coords[:, 1] = np.clip(coords[:, 1], 0, orig_h - 1)
 
         return coords
+
+    # ------------------------------------------------------------------
+    # Corner expansion
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _expand_corners(
+        corners: np.ndarray,
+        margin_pct: float,
+        img_w: int,
+        img_h: int,
+    ) -> np.ndarray:
+        """
+        Push each corner outward from the quad centroid by *margin_pct*
+        of the diagonal, then clip to image bounds.
+
+        This compensates for YOLO keypoints landing slightly inside the
+        true card edge, which otherwise crops the collector-number strip.
+        """
+        centroid = corners.mean(axis=0)
+        diag = np.sqrt(img_w ** 2 + img_h ** 2)
+        margin = diag * margin_pct
+
+        expanded = corners.copy()
+        for i in range(4):
+            direction = corners[i] - centroid
+            length = np.linalg.norm(direction)
+            if length > 0:
+                expanded[i] = corners[i] + direction / length * margin
+
+        expanded[:, 0] = np.clip(expanded[:, 0], 0, img_w - 1)
+        expanded[:, 1] = np.clip(expanded[:, 1], 0, img_h - 1)
+        return expanded.astype(np.float32)
 
     # ------------------------------------------------------------------
     # Fallback

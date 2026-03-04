@@ -841,23 +841,39 @@ class GeminiIdentifyResponse(BaseModel):
 class GeminiPillarScoreResponse(BaseModel):
     score: float = 0.0
     notes: str = ""
-    front_lr: str = ""
-    front_tb: str = ""
+    lr: str = ""    # centering only: left/right ratio
+    tb: str = ""    # centering only: top/bottom ratio
+
+
+class GeminiSideGradeResponse(BaseModel):
+    """Grades for one side (front or back) of the card."""
+    grade: float = 0.0
+    centering: Optional[GeminiPillarScoreResponse] = None
+    corners: Optional[GeminiPillarScoreResponse] = None
+    edges: Optional[GeminiPillarScoreResponse] = None
+    surface: Optional[GeminiPillarScoreResponse] = None
 
 
 class GeminiDefectResponse(BaseModel):
+    side: str = ""       # "front" or "back"
     location: str = ""
     type: str = ""
     severity: str = ""
+    visibility: str = "" # "clearly visible" or "faintly visible at angle"
 
 
 class GeminiGradeResponse(BaseModel):
-    """Response from Gemini-based card grading."""
+    """Response from Gemini-based card grading with front/back separation."""
     success: bool
     processing_time_ms: float
     model_used: str = ""
     overall_grade: float = 0.0
     grade_label: str = ""
+    front_grade: float = 0.0
+    back_grade: float = 0.0
+    front: Optional[GeminiSideGradeResponse] = None
+    back: Optional[GeminiSideGradeResponse] = None
+    # Legacy combined scores (backward compat)
     centering: Optional[GeminiPillarScoreResponse] = None
     corners: Optional[GeminiPillarScoreResponse] = None
     edges: Optional[GeminiPillarScoreResponse] = None
@@ -1047,15 +1063,39 @@ async def gemini_identify(
     )
 
 
+def _pillar_to_response(p) -> Optional[GeminiPillarScoreResponse]:
+    """Convert a PillarScore dataclass to API response model."""
+    if not p:
+        return None
+    return GeminiPillarScoreResponse(
+        score=p.score, notes=p.notes, lr=getattr(p, "lr", ""), tb=getattr(p, "tb", ""),
+    )
+
+
+def _side_to_response(side) -> Optional[GeminiSideGradeResponse]:
+    """Convert a SideGrade dataclass to API response model."""
+    if not side:
+        return None
+    return GeminiSideGradeResponse(
+        grade=side.grade,
+        centering=_pillar_to_response(side.centering),
+        corners=_pillar_to_response(side.corners),
+        edges=_pillar_to_response(side.edges),
+        surface=_pillar_to_response(side.surface),
+    )
+
+
 @app.post("/gemini/grade", response_model=GeminiGradeResponse)
 async def gemini_grade(
-    file: UploadFile = File(...),
+    file: UploadFile = File(..., description="Front image of the card"),
+    back_file: Optional[UploadFile] = File(None, description="Back image of the card (optional)"),
 ):
     """Grade a Pokemon card's physical condition using Gemini Vision AI.
 
-    Evaluates 4 pillars (Centering, Corners, Edges, Surface) following
-    PSA/BGS/CGC-style grading standards. Returns overall grade 1-10
-    with detailed explanation.
+    Evaluates front and back SEPARATELY across 4 pillars
+    (Centering, Corners, Edges, Surface) following PSA/BGS/CGC-style
+    grading standards. Returns overall grade, front grade, and back
+    grade (1-10) with detailed explanation.
 
     Note: This is an estimated grade, not an official PSA/BGS/CGC grade.
     """
@@ -1066,43 +1106,23 @@ async def gemini_grade(
         )
 
     if not file.content_type or not file.content_type.startswith("image/"):
-        raise HTTPException(status_code=400, detail="File must be an image")
+        raise HTTPException(status_code=400, detail="Front file must be an image")
 
-    contents = await file.read()
+    front_bytes = await file.read()
     mime = file.content_type or "image/jpeg"
 
-    result = _gemini_grader.grade(contents, mime_type=mime)
+    back_bytes = None
+    if back_file and back_file.filename:
+        if not back_file.content_type or not back_file.content_type.startswith("image/"):
+            raise HTTPException(status_code=400, detail="Back file must be an image")
+        back_bytes = await back_file.read()
 
-    centering = None
-    if result.centering:
-        centering = GeminiPillarScoreResponse(
-            score=result.centering.score,
-            notes=result.centering.notes,
-            front_lr=result.centering.front_lr,
-            front_tb=result.centering.front_tb,
-        )
-
-    corners = None
-    if result.corners:
-        corners = GeminiPillarScoreResponse(
-            score=result.corners.score, notes=result.corners.notes,
-        )
-
-    edges = None
-    if result.edges:
-        edges = GeminiPillarScoreResponse(
-            score=result.edges.score, notes=result.edges.notes,
-        )
-
-    surface = None
-    if result.surface:
-        surface = GeminiPillarScoreResponse(
-            score=result.surface.score, notes=result.surface.notes,
-        )
+    result = _gemini_grader.grade(front_bytes, back_bytes=back_bytes, mime_type=mime)
 
     defects = [
         GeminiDefectResponse(
-            location=d.location, type=d.type, severity=d.severity,
+            side=d.side, location=d.location, type=d.type,
+            severity=d.severity, visibility=d.visibility,
         )
         for d in result.key_defects
     ]
@@ -1113,10 +1133,14 @@ async def gemini_grade(
         model_used=result.model_used,
         overall_grade=result.overall_grade,
         grade_label=result.grade_label,
-        centering=centering,
-        corners=corners,
-        edges=edges,
-        surface=surface,
+        front_grade=result.front_grade,
+        back_grade=result.back_grade,
+        front=_side_to_response(result.front),
+        back=_side_to_response(result.back),
+        centering=_pillar_to_response(result.centering),
+        corners=_pillar_to_response(result.corners),
+        edges=_pillar_to_response(result.edges),
+        surface=_pillar_to_response(result.surface),
         key_defects=defects,
         explanation=result.explanation,
         grade_probabilities=result.grade_probabilities,
