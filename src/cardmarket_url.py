@@ -92,12 +92,16 @@ def card_url(
     Returns:
         CardMarket URL (direct redirect or search).
     """
-    # 1. idProduct redirect (most reliable — auto-redirects to exact product page)
-    #    Only use for EN cards — JP/TW cm_id_product is inherited from EN by name
-    #    matching and may point to a different card from a different set.
+    # 1. idProduct redirect — auto-redirects to exact product page.
+    #    Only use when we DON'T have a collector number, because multiple cards
+    #    can share the same cm_id_product (e.g. regular vs full-art printings)
+    #    and the redirect always resolves to a single one.
+    #    When we have collector_number + set_id, the search URL (below) is more
+    #    precise because it includes the card number in the query.
     lang = card.get("language", "en")
     cm_id = card.get("cm_id_product") or card.get("id_product")
-    if cm_id and str(cm_id).isdigit() and lang == "en":
+    has_collector = card.get("collector_number") is not None and card.get("set_id")
+    if cm_id and str(cm_id).isdigit() and lang == "en" and not has_collector:
         return f"{CM_BASE}/{locale}/Pokemon/Products?idProduct={cm_id}"
 
     # 2. Fall back to search URL
