@@ -479,6 +479,7 @@ def _match_to_card(card: dict, locale: str = "en") -> SQLCardMatch:
         "language": card.get("language", "en"),
         "cm_expansion_id": card.get("cm_expansion_id"),
         "set_id": card.get("set_id", ""),
+        "abbreviation": card.get("abbreviation", ""),
         "collector_number": card.get("collector_number"),
     }
     cm_url = card_url(cm_card, locale=locale) if (cm_id or card.get("name")) else ""

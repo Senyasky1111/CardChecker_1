@@ -11,7 +11,7 @@
   h1 { text-align: center; color: #ffcc00; font-size: 1.8rem; margin: 20px 0; }
   h1 span { color: #ff4444; }
 
-  .upload-area { 
+  .upload-area {
     border: 2px dashed #444; border-radius: 16px; padding: 40px; text-align: center;
     margin: 20px 0; cursor: pointer; transition: border-color 0.3s;
     background: #1a1a2e;
@@ -19,7 +19,7 @@
   .upload-area:hover { border-color: #ffcc00; }
   .upload-area.dragover { border-color: #ffcc00; background: #1a1a3e; }
 
-  .btn { 
+  .btn {
     display: inline-block; padding: 12px 24px; border: none; border-radius: 8px;
     font-size: 1rem; cursor: pointer; margin: 8px; font-weight: 600;
     transition: transform 0.1s, opacity 0.2s;
@@ -42,21 +42,22 @@
   .result-card h3 { color: #ffcc00; font-size: 1.2rem; margin-bottom: 8px; }
   .result-card.alt h3 { color: #888; }
   .result-meta { display: flex; flex-wrap: wrap; gap: 16px; margin: 8px 0; }
-  .result-meta .tag { 
+  .result-meta .tag {
     background: #252540; padding: 4px 12px; border-radius: 20px; font-size: 0.85rem;
   }
   .confidence { color: #4caf50; font-weight: bold; }
   .confidence.low { color: #ff9800; }
   .price { color: #ffcc00; font-size: 1.1rem; font-weight: bold; }
-  .cm-link { 
-    display: inline-block; margin-top: 8px; color: #64b5f6; text-decoration: none;
+  .links { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 10px; }
+  .cm-link {
+    display: inline-block; color: #64b5f6; text-decoration: none;
     font-size: 0.9rem;
   }
   .cm-link:hover { text-decoration: underline; }
 
   .spinner { display: none; text-align: center; margin: 20px 0; }
   .spinner.active { display: block; }
-  .spinner::after { 
+  .spinner::after {
     content: ''; display: inline-block; width: 32px; height: 32px;
     border: 3px solid #333; border-top-color: #ffcc00; border-radius: 50%;
     animation: spin 0.8s linear infinite;
@@ -65,11 +66,22 @@
 
   .timing { color: #666; font-size: 0.8rem; text-align: center; margin-top: 8px; }
   .error { color: #ff4444; text-align: center; margin: 16px 0; }
+
+  nav { text-align: center; margin: 10px 0; }
+  nav a { color: #64b5f6; text-decoration: none; margin: 0 12px; font-size: 0.85rem; }
+  nav a:hover { text-decoration: underline; }
 </style>
 </head>
 <body>
 <div class="container">
   <h1>&#9889; Card<span>Checker</span></h1>
+  <nav>
+    <a href="/scan">Scanner v2</a>
+    <a href="/scan_2">Scanner v3</a>
+    <a href="/detect">Number Detect</a>
+    <a href="/detect-test">Card Detect</a>
+    <a href="/docs">API Docs</a>
+  </nav>
 
   <div class="upload-area" id="dropZone">
     <p style="font-size: 1.1rem; margin-bottom: 16px;">Drop a card photo here or click to upload</p>
@@ -133,13 +145,13 @@ function handleFile(file) {
 
 async function identify() {
   if (!selectedFile) return;
-  
+
   const btn = document.getElementById('identifyBtn');
   const spinner = document.getElementById('spinner');
   const errorEl = document.getElementById('error');
   const resultsEl = document.getElementById('results');
   const timingEl = document.getElementById('timing');
-  
+
   btn.disabled = true;
   spinner.classList.add('active');
   errorEl.textContent = '';
@@ -150,7 +162,7 @@ async function identify() {
     const formData = new FormData();
     formData.append('file', selectedFile);
 
-    const resp = await fetch(`${API}/identify?k=5&use_ocr=true`, {
+    const resp = await fetch(`${API}/identify-v2`, {
       method: 'POST',
       body: formData,
     });
@@ -162,12 +174,9 @@ async function identify() {
     }
 
     let timingText = `${data.method.toUpperCase()} | ${data.processing_time_ms.toFixed(0)}ms`;
-    if (data.ocr) {
-      const parts = [];
-      if (data.ocr.name) parts.push(`name: "${data.ocr.name}"`);
-      if (data.ocr.collector_number) parts.push(`#${data.ocr.collector_number}`);
-      if (parts.length) timingText += ` | OCR: ${parts.join(', ')}`;
-    }
+    if (data.ocr_name) timingText += ` | OCR: "${data.ocr_name}"`;
+    if (data.ocr_number) timingText += ` #${data.ocr_number}`;
+    if (data.detected_language !== 'en') timingText += ` | lang: ${data.detected_language}`;
     timingEl.textContent = timingText;
 
     // Top match
@@ -189,21 +198,53 @@ async function identify() {
 }
 
 function renderCard(card, isAlt) {
-  const confClass = card.confidence > 0.9 ? 'confidence' : 'confidence low';
-  const confPct = (card.confidence * 100).toFixed(1);
-  const priceStr = card.price_trend > 0 ? `${card.price_trend.toFixed(2)} EUR` : 'N/A';
-  
+  const confPct = ((card.confidence || 0) * 100).toFixed(1);
+  const confClass = confPct > 90 ? 'confidence' : 'confidence low';
+
+  // Prices
+  const priceEur = card.price_trend > 0 ? `${card.price_trend.toFixed(2)} EUR` : (card.price_low > 0 ? `from ${card.price_low.toFixed(2)} EUR` : '');
+  const priceUsd = card.price_usd > 0 ? `${card.price_usd.toFixed(2)} USD` : '';
+  const priceStr = priceEur || priceUsd || 'N/A';
+
+  // Card number display
+  const numStr = card.collector_number ? `#${card.collector_number}${card.set_total ? '/' + card.set_total : ''}` : '';
+
+  // Links
+  let linksHtml = '';
+  if (card.cardmarket_url) {
+    linksHtml += `<a class="cm-link" href="${card.cardmarket_url}" target="_blank">CardMarket &rarr;</a>`;
+  }
+  if (card.tcgplayer_url) {
+    linksHtml += `<a class="cm-link" href="${card.tcgplayer_url}" target="_blank">TCGPlayer &rarr;</a>`;
+  }
+  if (card.pricecharting_url) {
+    linksHtml += `<a class="cm-link" href="${card.pricecharting_url}" target="_blank">PriceCharting &rarr;</a>`;
+  }
+
+  // Graded prices
+  let gradedHtml = '';
+  if (card.has_graded) {
+    const parts = [];
+    if (card.graded_psa10) parts.push(`PSA 10: ${card.graded_psa10.toFixed(0)} EUR`);
+    if (card.graded_psa9) parts.push(`PSA 9: ${card.graded_psa9.toFixed(0)} EUR`);
+    if (card.graded_cgc10) parts.push(`CGC 10: ${card.graded_cgc10.toFixed(0)} EUR`);
+    if (parts.length) {
+      gradedHtml = `<div style="margin-top:6px;font-size:0.8rem;color:#aaa;">Graded: ${parts.join(' | ')}</div>`;
+    }
+  }
+
   return `
     <div class="result-card ${isAlt ? 'alt' : ''}">
-      <h3>${card.name}</h3>
+      <h3>${card.name || card.eng_name}${numStr ? ' <span style="color:#888;font-size:0.9rem">' + numStr + '</span>' : ''}</h3>
       <div class="result-meta">
-        <span class="tag">${card.expansion || 'Unknown set'}</span>
+        <span class="tag">${card.set_name || card.set_id || 'Unknown set'}</span>
+        <span class="tag">${card.language.toUpperCase()}</span>
+        ${card.rarity ? '<span class="tag">' + card.rarity + '</span>' : ''}
         <span class="tag ${confClass}">${confPct}% match</span>
         <span class="tag price">${priceStr}</span>
       </div>
-      <a class="cm-link" href="${card.cardmarket_url}" target="_blank" rel="noopener">
-        View on CardMarket &rarr;
-      </a>
+      ${gradedHtml}
+      <div class="links">${linksHtml}</div>
     </div>
   `;
 }

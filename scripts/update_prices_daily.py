@@ -26,7 +26,7 @@ from pathlib import Path
 
 import requests
 
-sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace", line_buffering=True)
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from src.config import (
     POKETRACE_API_KEY, POKETRACE_BASE_URL, POKETRACE_BURST_DELAY,
@@ -54,12 +54,14 @@ pa_session.headers["Accept"] = "application/json"
 
 pt_calls = 0
 pa_calls = 0
+pt_consecutive_429 = 0
+PT_429_ABORT = 5  # Stop after 5 consecutive 429s (quota clearly exhausted)
 
 
 def pt_get(endpoint, params=None, retries=3):
     """PokeTrace GET with rate limit."""
-    global pt_calls
-    if pt_calls >= PT_LIMIT:
+    global pt_calls, pt_consecutive_429
+    if pt_calls >= PT_LIMIT or pt_consecutive_429 >= PT_429_ABORT:
         return None
     for attempt in range(retries):
         try:
@@ -67,13 +69,19 @@ def pt_get(endpoint, params=None, retries=3):
             r = pt_session.get(f"{POKETRACE_BASE_URL}{endpoint}", params=params, timeout=15)
             pt_calls += 1
             if r.status_code == 200:
+                pt_consecutive_429 = 0
                 return r.json()
             elif r.status_code == 429:
+                pt_consecutive_429 += 1
+                if pt_consecutive_429 >= PT_429_ABORT:
+                    print(f"  [PT 429] Quota exhausted ({pt_consecutive_429} consecutive 429s). Stopping PokeTrace.")
+                    return None
                 wait = int(r.headers.get("Retry-After", 10))
                 print(f"  [PT 429] waiting {wait}s...")
                 time.sleep(wait)
                 continue
             else:
+                pt_consecutive_429 = 0
                 return None
         except Exception:
             if attempt < retries - 1:
@@ -134,7 +142,7 @@ def update_poketrace_bulk(conn, dry_run=False):
     price_rows = 0
 
     for i in range(0, len(cm_ids), batch_size):
-        if pt_calls >= PT_LIMIT:
+        if pt_calls >= PT_LIMIT or pt_consecutive_429 >= PT_429_ABORT:
             print(f"  API limit reached at {pt_calls} calls")
             break
 
@@ -220,7 +228,7 @@ def update_poketrace_search(conn, dry_run=False):
     print("\n=== Step 2: PokeTrace Search — ALL cards without CM ID ===")
 
     cards = conn.execute("""
-        SELECT c.tcgdex_id, c.name, c.eng_name, c.collector_number, c.language
+        SELECT c.tcgdex_id, c.name, c.eng_name, c.collector_number, c.language, c.set_id
         FROM cards c
         WHERE (c.cm_id_product IS NULL OR c.cm_id_product = 0)
         AND c.eng_name IS NOT NULL AND c.eng_name != ''
@@ -239,7 +247,7 @@ def update_poketrace_search(conn, dry_run=False):
     new_cm_ids = 0
 
     for idx, card in enumerate(cards):
-        if pt_calls >= PT_LIMIT:
+        if pt_calls >= PT_LIMIT or pt_consecutive_429 >= PT_429_ABORT:
             print(f"  API limit reached at {pt_calls} calls")
             break
 
@@ -288,12 +296,17 @@ def update_poketrace_search(conn, dry_run=False):
             enriched_at = ? WHERE tcgdex_id = ?""",
             (top_eur, top_usd, NOW, card["tcgdex_id"]))
 
-        # Fill cm_id_product if found
+        # Fill cm_id_product if found — check for duplicates first
         cm_id = best.get("refs", {}).get("cardmarketId")
         if cm_id:
-            conn.execute("UPDATE cards SET cm_id_product = ? WHERE tcgdex_id = ?",
-                         (cm_id, card["tcgdex_id"]))
-            new_cm_ids += 1
+            existing = conn.execute(
+                "SELECT tcgdex_id FROM cards WHERE cm_id_product = ? AND set_id = ? AND language = ?",
+                (cm_id, card["set_id"], card["language"])
+            ).fetchone()
+            if not existing:
+                conn.execute("UPDATE cards SET cm_id_product = ? WHERE tcgdex_id = ?",
+                             (cm_id, card["tcgdex_id"]))
+                new_cm_ids += 1
 
         matched += 1
 

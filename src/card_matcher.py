@@ -211,6 +211,25 @@ class CardMatcher:
             else:
                 result.method = "ocr_name"
 
+            # Safety net: when name match is poor, OCR likely misread the
+            # number and SQL returned wrong candidates.  Try CLIP visual
+            # search — if it finds a better match, prefer it.
+            if top_score < 50 and self._recognizer:
+                clip_results = self._clip_fallback(image)
+                if clip_results:
+                    clip_top = clip_results[0]
+                    clip_name_score = fuzz.ratio(
+                        ocr_norm,
+                        _normalize_name(clip_top.get("name", "")),
+                    )
+                    if clip_name_score > top_score:
+                        # CLIP found a card whose name matches OCR better
+                        ranked = clip_results
+                        result.method = "clip_only"
+                        print(f"[match] CLIP safety net: OCR name score "
+                              f"{top_score} -> CLIP name score {clip_name_score} "
+                              f"({clip_top.get('name', '')})")
+
             result.success = True
             result.card = ranked[0]
             result.candidates = ranked

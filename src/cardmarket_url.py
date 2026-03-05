@@ -93,15 +93,11 @@ def card_url(
         CardMarket URL (direct redirect or search).
     """
     # 1. idProduct redirect — auto-redirects to exact product page.
-    #    Only use when we DON'T have a collector number, because multiple cards
-    #    can share the same cm_id_product (e.g. regular vs full-art printings)
-    #    and the redirect always resolves to a single one.
-    #    When we have collector_number + set_id, the search URL (below) is more
-    #    precise because it includes the card number in the query.
+    #    cm_id_product is now unique per card (duplicates cleaned), so this
+    #    is the most reliable method. Works for EN cards with a valid product ID.
     lang = card.get("language", "en")
     cm_id = card.get("cm_id_product") or card.get("id_product")
-    has_collector = card.get("collector_number") is not None and card.get("set_id")
-    if cm_id and str(cm_id).isdigit() and lang == "en" and not has_collector:
+    if cm_id and str(cm_id).isdigit():
         return f"{CM_BASE}/{locale}/Pokemon/Products?idProduct={cm_id}"
 
     # 2. Fall back to search URL
@@ -112,21 +108,22 @@ def card_url(
         search_name = card.get("name", "")
     search_name = _clean_card_name(search_name)
 
-    # Append set code and collector number for more precise search
-    # e.g. "Charizard ex SV2a 006" narrows results better than just "Charizard ex"
+    # Append set abbreviation and collector number for more precise search.
+    # Use abbreviation (e.g. "HIF") instead of set_id (e.g. "sm115") because
+    # CardMarket recognises its own abbreviations but not tcgdex set codes.
+    set_abbr = card.get("abbreviation", "")
     set_id = card.get("set_id", "")
     collector_num = card.get("collector_number")
-    if set_id and collector_num is not None:
-        # Remove language prefix (tw-, jp-) from set_id for CardMarket search
-        clean_set = re.sub(r"^(tw-|jp-)", "", set_id)
+    # Prefer abbreviation; fall back to cleaned set_id
+    display_set = set_abbr or re.sub(r"^(tw-|jp-)", "", set_id)
+    if display_set and collector_num is not None:
         try:
             num_str = f"{int(collector_num):03d}"
         except (ValueError, TypeError):
             num_str = str(collector_num)
-        search_name = f"{search_name} {clean_set} {num_str}"
-    elif set_id:
-        clean_set = re.sub(r"^(tw-|jp-)", "", set_id)
-        search_name = f"{search_name} {clean_set}"
+        search_name = f"{search_name} {display_set} {num_str}"
+    elif display_set:
+        search_name = f"{search_name} {display_set}"
 
     params: dict[str, str] = {"searchString": search_name}
     # Only use cm_expansion_id for EN cards — for JP/TW it's inherited from EN
