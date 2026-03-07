@@ -573,21 +573,107 @@ class CardOCR:
 
         return name, conf
 
+    def _ocr_name_tesseract(
+        self, region_np: np.ndarray
+    ) -> tuple[Optional[str], float]:
+        """Run Tesseract on a name region image. Returns (cleaned_name, confidence).
+
+        Tesseract is the primary OCR for name extraction — it's fast (~30-80ms),
+        doesn't hallucinate CJK characters from holographic reflections, and
+        handles Latin text reliably.
+
+        Uses PSM 7 (single text line) first, falls back to PSM 6 (text block).
+        """
+        import pytesseract
+
+        tess_cmd = _find_tesseract()
+        if tess_cmd is None:
+            raise RuntimeError("Tesseract not found")
+        pytesseract.pytesseract.tesseract_cmd = tess_cmd
+
+        best_name: Optional[str] = None
+        best_conf = 0.0
+
+        for psm in (7, 6):
+            config = f"--oem 3 --psm {psm}"
+            try:
+                data = pytesseract.image_to_data(
+                    region_np, config=config,
+                    output_type=pytesseract.Output.DICT,
+                )
+            except Exception:
+                continue
+
+            words: list[str] = []
+            confidences: list[int] = []
+            for i, text in enumerate(data["text"]):
+                conf = int(data["conf"][i])
+                # Per-word threshold filters out low-confidence noise
+                # ("oy)", "l", "a") while keeping actual name words
+                if conf >= 40 and text.strip():
+                    words.append(text.strip())
+                    confidences.append(conf)
+
+            if not words:
+                continue
+
+            raw_name = " ".join(words)
+            avg_conf = sum(confidences) / len(confidences) / 100.0  # → 0-1
+
+            cleaned = self._clean_name(raw_name)
+            # A real card name must have >= 3 letter characters —
+            # rejects OCR artifacts like "= vo", "| 1", "—" etc.
+            letter_count = sum(
+                1 for c in cleaned
+                if c.isalpha() or "\u3040" <= c <= "\u9fff"
+            )
+            if cleaned and letter_count >= 3 and avg_conf > best_conf:
+                best_name = cleaned
+                best_conf = avg_conf
+
+        return best_name, best_conf
+
     def _ocr_name_region(
         self, card_img: Image.Image, crop_region: dict
     ) -> tuple[Optional[str], float]:
-        """Run OCR on a specific crop region and return best name candidate."""
+        """Run OCR on a specific crop region and return best name candidate.
+
+        Uses Tesseract as primary OCR (fast, ~30-80ms, no CJK hallucinations)
+        with EasyOCR as fallback (slower but handles CJK languages).
+        """
         region = self._crop_region(card_img, crop_region)
 
         # Use color image upscaled 2x (works better than threshold for names)
         region_np = np.array(region.convert("RGB"))
         h, w = region_np.shape[:2]
-        region_np = cv2.resize(
+        region_up = cv2.resize(
             region_np, (w * 2, h * 2), interpolation=cv2.INTER_CUBIC
         )
 
+        # --- Strategy 1: Tesseract (primary, fast ~30-80ms) ---
+        tess_name: Optional[str] = None
+        tess_conf = 0.0
+
+        if _find_tesseract() is not None:
+            try:
+                tess_name, tess_conf = self._ocr_name_tesseract(region_up)
+
+                # Also try preprocessed (threshold) if color result is poor
+                if tess_conf < 0.6:
+                    preprocessed = self._preprocess_for_ocr(region)
+                    name2, conf2 = self._ocr_name_tesseract(preprocessed)
+                    if name2 and conf2 > tess_conf:
+                        tess_name, tess_conf = name2, conf2
+
+                # Good Tesseract result — skip EasyOCR entirely
+                if tess_name and tess_conf >= 0.5:
+                    return tess_name, tess_conf
+            except Exception:
+                pass
+
+        # --- Strategy 2: EasyOCR (fallback — slower but handles CJK) ---
         reader = self._get_reader()
-        results = reader.readtext(region_np, detail=1, paragraph=False)
+        results = reader.readtext(region_up, detail=1, paragraph=False)
 
         if not results:
             # Try with preprocessed (threshold) version
@@ -595,7 +681,7 @@ class CardOCR:
             results = reader.readtext(preprocessed, detail=1, paragraph=False)
 
         if not results:
-            return None, 0.0
+            return (tess_name, tess_conf) if tess_name else (None, 0.0)
 
         # Collect valid candidates
         _NOISE = {"HP", "hp", "Hp", "hP", "EX", "GX", "ex", "gx", "V", "VMAX", "VSTAR",
@@ -610,7 +696,7 @@ class CardOCR:
                 candidates.append((y_pos, conf, cleaned))
 
         if not candidates:
-            return None, 0.0
+            return (tess_name, tess_conf) if tess_name else (None, 0.0)
 
         # Strategy: if there's a high-confidence candidate (>= 0.7), prefer it
         # regardless of Y position (handles Trainer cards where name is below banner).
@@ -618,11 +704,16 @@ class CardOCR:
         high_conf = [(y, c, t) for y, c, t in candidates if c >= 0.7]
         if high_conf:
             high_conf.sort(key=lambda x: x[0])  # topmost among high-conf
-            return high_conf[0][2], high_conf[0][1]
+            easy_name, easy_conf = high_conf[0][2], high_conf[0][1]
+        else:
+            # No high-confidence — take topmost
+            candidates.sort(key=lambda x: (x[0], -x[1]))
+            easy_name, easy_conf = candidates[0][2], candidates[0][1]
 
-        # No high-confidence — take topmost
-        candidates.sort(key=lambda x: (x[0], -x[1]))
-        return candidates[0][2], candidates[0][1]
+        # Return best between Tesseract (low-conf) and EasyOCR
+        if tess_name and tess_conf >= easy_conf:
+            return tess_name, tess_conf
+        return easy_name, easy_conf
 
     @staticmethod
     def _clean_name(raw: str) -> str:
@@ -672,6 +763,14 @@ class CardOCR:
         name = re.sub(r"\s*(Put|Evolves|on the)\s+.*$", "", name, flags=re.IGNORECASE)
         # Remove trailing dots, brackets, and random characters
         name = re.sub(r"[\[\].\s]+$", "", name)
+        # Remove leading non-letter noise (Tesseract artifacts: "oy) ", "pe) ", "= ")
+        # Keeps CJK starts and normal Latin starts (A-Z, a-z)
+        name = re.sub(
+            r"^[^a-zA-Z\u3040-\u9FFF]+",
+            "", name,
+        )
+        # Remove trailing single lowercase letter (OCR artifact: "Flareon l")
+        name = re.sub(r"\s+[a-z]$", "", name)
         # Normalize whitespace
         name = " ".join(name.split())
         return name.strip()

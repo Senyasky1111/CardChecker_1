@@ -206,7 +206,7 @@ class CardMatcher:
 
             if len(tied) > 1 and self._recognizer:
                 # Multiple candidates with same name — CLIP picks the right printing
-                reranked_tied = self._clip_rerank(image, tied)
+                reranked_tied = self._clip_rerank(card_image, tied)
                 # Put CLIP-reranked tied candidates first, then the rest
                 rest = [c for c in ranked if c not in tied]
                 ranked = reranked_tied + rest
@@ -215,23 +215,17 @@ class CardMatcher:
                 result.method = "ocr_name"
 
             # Safety net: when name match is poor, OCR likely misread the
-            # number and SQL returned wrong candidates.  Try CLIP visual
-            # search — if it finds a better match, prefer it.
-            if top_score < 50 and self._recognizer:
-                clip_results = self._clip_fallback(image)
+            # card text entirely (e.g. holographic reflections → garbage).
+            # Trust CLIP visual search directly — don't compare against the
+            # garbage OCR name since neither SQL nor CLIP results will match it.
+            if top_score < 55 and self._recognizer:
+                clip_results = self._clip_fallback(card_image)
                 if clip_results:
-                    clip_top = clip_results[0]
-                    clip_name_score = fuzz.ratio(
-                        ocr_norm,
-                        _normalize_name(clip_top.get("name", "")),
-                    )
-                    if clip_name_score > top_score:
-                        # CLIP found a card whose name matches OCR better
-                        ranked = clip_results
-                        result.method = "clip_only"
-                        print(f"[match] CLIP safety net: OCR name score "
-                              f"{top_score} -> CLIP name score {clip_name_score} "
-                              f"({clip_top.get('name', '')})")
+                    print(f"[match] CLIP safety net: OCR name score "
+                          f"{top_score} < 50, using CLIP visual match "
+                          f"({clip_results[0].get('name', '')})")
+                    ranked = clip_results
+                    result.method = "clip_only"
 
             result.success = True
             result.card = ranked[0]
@@ -240,7 +234,7 @@ class CardMatcher:
         else:
             # Multiple candidates, no name — use CLIP visual verification
             # to pick the right card when same number exists across languages
-            reranked = self._clip_rerank(image, candidates)
+            reranked = self._clip_rerank(card_image, candidates)
             result.success = True
             result.method = "ocr_number"
             result.card = reranked[0]
