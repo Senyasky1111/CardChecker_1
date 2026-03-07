@@ -161,8 +161,11 @@ class CardMatcher:
         used_clip_fallback = False
 
         if not candidates:
-            # Fallback: CLIP visual search when OCR found nothing
-            clip_result = self._clip_fallback(image)
+            # Fallback: CLIP visual search when OCR found nothing.
+            # Use the warped (perspective-corrected) image when available —
+            # the original photo includes background/sleeve/glare which
+            # confuses CLIP embeddings.
+            clip_result = self._clip_fallback(card_image)
             if clip_result:
                 candidates = clip_result
                 used_clip_fallback = True
