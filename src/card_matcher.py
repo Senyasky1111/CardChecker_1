@@ -167,6 +167,9 @@ class CardMatcher:
             # confuses CLIP embeddings.
             clip_result = self._clip_fallback(card_image)
             if clip_result:
+                clip_result = self._refine_clip_with_ocr_number(
+                    clip_result, ocr_result
+                )
                 candidates = clip_result
                 used_clip_fallback = True
             else:
@@ -184,10 +187,38 @@ class CardMatcher:
             result.card = candidates[0]
             result.confidence = 0.75
         elif len(candidates) == 1:
-            result.success = True
-            result.method = "ocr_exact"
-            result.card = candidates[0]
-            result.confidence = 0.95
+            # Single candidate — verify with name if we have one.
+            # OCR might have read garbage (e.g. Japanese card → Tesseract
+            # returns Latin noise) and the SQL match could be wrong.
+            name_ok = True
+            if ocr_result.name and self._recognizer:
+                cand_name = candidates[0].get("name_normalized", "")
+                name_score = fuzz.ratio(
+                    _normalize_name(ocr_result.name), cand_name
+                )
+                if name_score < 55:
+                    # Name doesn't match — OCR is likely garbage.
+                    # Ask CLIP to verify or find the real card.
+                    clip_results = self._clip_fallback(card_image)
+                    if clip_results:
+                        clip_results = self._refine_clip_with_ocr_number(
+                            clip_results, ocr_result
+                        )
+                        print(f"[match] Single-candidate safety net: "
+                              f"name score {name_score} < 55, "
+                              f"CLIP → {clip_results[0].get('name', '')}")
+                        result.success = True
+                        result.method = "clip_only"
+                        result.card = clip_results[0]
+                        result.candidates = clip_results
+                        result.confidence = 0.75
+                        name_ok = False
+
+            if name_ok:
+                result.success = True
+                result.method = "ocr_exact"
+                result.card = candidates[0]
+                result.confidence = 0.95
         elif ocr_result.name:
             # Rank by name similarity
             ranked = self._rank_by_name(candidates, ocr_result.name)
@@ -221,8 +252,11 @@ class CardMatcher:
             if top_score < 55 and self._recognizer:
                 clip_results = self._clip_fallback(card_image)
                 if clip_results:
+                    clip_results = self._refine_clip_with_ocr_number(
+                        clip_results, ocr_result
+                    )
                     print(f"[match] CLIP safety net: OCR name score "
-                          f"{top_score} < 50, using CLIP visual match "
+                          f"{top_score} < 55, using CLIP visual match "
                           f"({clip_results[0].get('name', '')})")
                     ranked = clip_results
                     result.method = "clip_only"
@@ -481,6 +515,54 @@ class CardMatcher:
         except Exception as e:
             print(f"CLIP fallback failed: {e}")
             return []
+
+    def _refine_clip_with_ocr_number(
+        self, clip_results: list[dict], ocr: CardOCRResult
+    ) -> list[dict]:
+        """Combine CLIP visual match with OCR collector number.
+
+        When CLIP finds the right Pokemon but wrong printing (e.g. Ivysaur
+        from Mega Evolution instead of Ivysaur from M1L), use the OCR
+        number+total to find the exact card.
+
+        Strategy: take the CLIP top match name, search DB for that name +
+        OCR number/total.  If found, replace CLIP results.
+        """
+        cn = ocr.collector_number
+        if not cn or not clip_results:
+            return clip_results
+
+        clip_name = clip_results[0].get("name_normalized", "")
+        if not clip_name:
+            return clip_results
+
+        # Search for cards matching CLIP name + OCR number + total.
+        # Try both name_normalized and eng_name since CLIP might return
+        # an English card name but the target card is JP/TW.
+        total_clause = (
+            "AND (c.set_total = ? OR s.card_count_official = ?)"
+            if cn.total else ""
+        )
+        base_params_total = [cn.total, cn.total] if cn.total else []
+
+        for name_col in ("c.name_normalized", "LOWER(c.eng_name)"):
+            sql = (
+                _SELECT_SQL
+                + f" WHERE {name_col} = ? AND c.collector_number = ? "
+                + total_clause
+                + " ORDER BY p.trend DESC NULLS LAST LIMIT 5"
+            )
+            params: list = [clip_name, cn.number] + base_params_total
+            rows = self.conn.execute(sql, params).fetchall()
+            if rows:
+                refined = [_row_to_dict(r) for r in rows]
+                c = refined[0]
+                print(f"[match] CLIP+OCR cross-match: {c.get('name', '')} "
+                      f"#{c.get('collector_number', '')}/{c.get('set_total', '')} "
+                      f"[{c.get('abbreviation', '')}] ({c.get('language', '')})")
+                return refined
+
+        return clip_results
 
     def _clip_rerank(self, query_image: Image.Image, candidates: list[dict]) -> list[dict]:
         """

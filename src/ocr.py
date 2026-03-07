@@ -1043,7 +1043,9 @@ class CardOCR:
                         known_codes = _get_known_set_codes()
                         code_matches = _SET_CODE_RE.findall(cleaned)
                         _skip = {"HP", "EX", "GX", "EN", "JP", "DE", "FR",
-                                 "IT", "ES", "PT", "RGB", "PNG", "THE", "AND", "FOR"}
+                                 "IT", "ES", "PT", "RGB", "PNG", "THE", "AND", "FOR",
+                                 "AR", "SAR", "SR", "UR", "RR", "RRR", "CHR", "CSR",
+                                 "HR", "TR", "SSR", "PR", "SIR", "ACE"}
                         for code in code_matches:
                             if code in known_codes and code not in _skip:
                                 set_code = code
@@ -1060,9 +1062,15 @@ class CardOCR:
         set_code = None
         known_codes = _get_known_set_codes()
         code_matches = _SET_CODE_RE.findall(cleaned)
-        # Filter out common false positives
+        # Filter out common false positives and rarity markers.
+        # Japanese Pokemon TCG prints rarity codes (AR, SAR, SR, etc.) right
+        # after the collector number — OCR picks them up as "set codes" but
+        # they're NOT set abbreviations.  E.g. "083/073 AR" = Art Rare, not Arceus.
         skip = {"HP", "EX", "GX", "EN", "JP", "DE", "FR", "IT", "ES", "PT",
-                "RGB", "PNG", "THE", "AND", "FOR"}
+                "RGB", "PNG", "THE", "AND", "FOR",
+                # Rarity markers (JP/TW cards)
+                "AR", "SAR", "SR", "UR", "RR", "RRR", "CHR", "CSR",
+                "HR", "TR", "SSR", "PR", "SIR", "ACE"}
 
         # Strategy 1: Check if any OCR word is a known set code
         for code in code_matches:
