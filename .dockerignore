@@ -1,0 +1,42 @@
+# Virtual env
+venv/
+.venv/
+
+# Card images (35GB — not needed at runtime)
+data/cardmarket/images/
+
+# Browser profiles (Cloudflare scraping)
+data/cardmarket/_browser_profile/
+data/cardmarket/_cdp_profile/
+
+# Debug/test images
+data/cardmarket/debug_*
+data/cardmarket/test_*
+
+# Training artifacts
+runs/
+notebooks/
+*.ipynb
+
+# Git
+.git/
+.gitignore
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Claude
+.claude/
+
+# Env (passed via docker-compose, not baked in)
+.env
