@@ -597,6 +597,55 @@ def _print_stats(conn, label=""):
     print(f"  prices_external: {pe} rows")
 
 
+# ── Step 5: Fix PriceCharting URLs ────────────────────────────────────
+
+def _fix_pricecharting_urls(conn):
+    """Regenerate PriceCharting search URLs for JP/TW cards.
+
+    Removes stale abbreviation codes (M1L, SV5K) that PriceCharting doesn't
+    recognize, and ensures correct language tag (japanese/chinese).
+    """
+    import re as _re
+    from urllib.parse import quote_plus
+
+    PC_BASE = "https://www.pricecharting.com"
+    fixed = 0
+
+    rows = conn.execute("""
+        SELECT tcgdex_id, name, eng_name, language, set_id, collector_number, pricecharting_url
+        FROM cards WHERE language IN ('ja', 'zh-tw')
+    """).fetchall()
+
+    print(f"\n=== Step 5: Fix PriceCharting URLs ({len(rows)} JP/TW cards) ===")
+
+    for tcgdex_id, name, eng_name, lang, set_id, collector_number, old_url in rows:
+        card_name = (eng_name or name or "").strip()
+        if not card_name:
+            continue
+
+        clean = _re.sub(r"\s*\[.*?\]", "", card_name)
+        clean = _re.sub(r"\s*\(.*?\)", "", clean).strip()
+        parts = [clean]
+
+        if collector_number is not None:
+            try:
+                parts.append(str(int(collector_number)))
+            except (ValueError, TypeError):
+                pass
+
+        parts.append("japanese" if lang == "ja" else "chinese")
+        query = " ".join(parts)
+        new_url = f"{PC_BASE}/search-products?q={quote_plus(query)}&type=prices"
+
+        if new_url != (old_url or "").strip():
+            conn.execute("UPDATE cards SET pricecharting_url = ? WHERE tcgdex_id = ?",
+                         (new_url, tcgdex_id))
+            fixed += 1
+
+    conn.commit()
+    print(f"  Fixed {fixed}/{len(rows)} PriceCharting URLs")
+
+
 # ── Main ─────────────────────────────────────────────────────────────
 
 def main():
@@ -634,6 +683,10 @@ def main():
     # Step 4: CSV Refresh
     if run_all or args.csv_only:
         update_from_csv(conn, dry_run=args.dry_run)
+
+    # Step 5: Regenerate PriceCharting URLs for JP/TW (remove stale abbreviation codes)
+    if run_all and not args.dry_run:
+        _fix_pricecharting_urls(conn)
 
     elapsed = time.time() - t0
 
