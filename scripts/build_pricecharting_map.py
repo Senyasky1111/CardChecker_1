@@ -389,10 +389,11 @@ def _build_search_url(name: str, set_info: str, lang: str, number=None) -> str:
     # Build search query
     parts = [clean_name]
 
-    # Add set info (cleaned)
-    if set_info:
-        clean_set = re.sub(r"^(tw-|jp-)", "", set_info)
-        parts.append(clean_set)
+    # Add set info — only for EN cards where it's an English name that PC recognizes.
+    # For JP/TW, abbreviation codes (M1L, SV5K) confuse PriceCharting search,
+    # so we rely on name + number + language keyword instead.
+    if set_info and lang == "en":
+        parts.append(set_info)
 
     # Add number for disambiguation
     if number is not None:
