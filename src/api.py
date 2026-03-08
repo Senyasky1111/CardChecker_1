@@ -1175,10 +1175,12 @@ if STATIC_DIR.exists():
         return FileResponse(str(STATIC_DIR / "scan_2.html"))
 
     @app.get("/privacy-policy", include_in_schema=False)
+    @app.get("/privacy-policy.html", include_in_schema=False)
     async def privacy_policy_page():
         return FileResponse(str(STATIC_DIR / "privacy-policy.html"))
 
     @app.get("/terms-of-service", include_in_schema=False)
+    @app.get("/terms-of-service.html", include_in_schema=False)
     async def terms_of_service_page():
         return FileResponse(str(STATIC_DIR / "terms-of-service.html"))
 
