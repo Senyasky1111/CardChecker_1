@@ -925,10 +925,13 @@ def _enrich_gemini_from_db(result) -> dict | None:
     # If multiple candidates, prefer the one matching the name
     if len(candidates) > 1 and name:
         name_lower = name.lower()
-        for c in candidates:
-            c_name = (c.get("name") or "").lower()
-            if c_name == name_lower or name_lower in c_name:
-                return c
+        name_matches = [c for c in candidates if name_lower in (c.get("name") or "").lower()]
+        if name_matches:
+            candidates = name_matches
+
+    # Prefer JP over TW when scores are otherwise equal
+    _LANG_PRI = {"ja": 0, "en": 1, "zh-tw": 2}
+    candidates.sort(key=lambda c: _LANG_PRI.get(c.get("language", ""), 9))
 
     return candidates[0]
 
