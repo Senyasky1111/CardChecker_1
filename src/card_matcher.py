@@ -68,6 +68,12 @@ def _normalize_name(name: str) -> str:
     return name.lower().strip()
 
 
+def _lang_priority(card: dict) -> int:
+    """Language tiebreaker: prefer JP > EN > TW when scores are equal."""
+    lang = card.get("language", "")
+    return {"ja": 0, "en": 1, "zh-tw": 2}.get(lang, 9)
+
+
 class CardMatcher:
     """SQL-based card matching with OCR input (multi-language)."""
 
@@ -439,25 +445,27 @@ class CardMatcher:
     def _filter_by_name(
         self, candidates: list[dict], ocr_name: str, threshold: float = 60
     ) -> list[dict]:
-        """Filter candidates by fuzzy name match."""
+        """Filter candidates by fuzzy name match. Prefer JP over TW on ties."""
         normalized = _normalize_name(ocr_name)
         scored = []
         for c in candidates:
             score = fuzz.ratio(normalized, c.get("name_normalized", ""))
             if score >= threshold:
-                scored.append((score, c))
-        scored.sort(key=lambda x: -x[0])
-        return [c for _, c in scored]
+                scored.append((score, _lang_priority(c), c))
+        scored.sort(key=lambda x: (-x[0], x[1]))
+        return [c for _, _, c in scored]
 
     def _rank_by_name(self, candidates: list[dict], ocr_name: str) -> list[dict]:
-        """Rank candidates by name similarity (best first)."""
+        """Rank candidates by name similarity (best first).
+        Secondary sort: prefer JP over TW when name scores are equal."""
         normalized = _normalize_name(ocr_name)
         scored = []
         for c in candidates:
             score = fuzz.ratio(normalized, c.get("name_normalized", ""))
-            scored.append((score, c))
-        scored.sort(key=lambda x: -x[0])
-        return [c for _, c in scored]
+            lang_pri = _lang_priority(c)
+            scored.append((score, lang_pri, c))
+        scored.sort(key=lambda x: (-x[0], x[1]))
+        return [c for _, _, c in scored]
 
     # ------------------------------------------------------------------
     # CLIP fallback & visual verification
@@ -613,8 +621,8 @@ class CardMatcher:
                 except Exception:
                     scored.append((0.0, c))
 
-            # Sort by CLIP similarity (highest first)
-            scored.sort(key=lambda x: -x[0])
+            # Sort by CLIP similarity (highest first), prefer JP over TW on ties
+            scored.sort(key=lambda x: (-x[0], _lang_priority(x[1])))
 
             # Only rerank if we actually got meaningful scores
             if scored[0][0] > 0.0:
