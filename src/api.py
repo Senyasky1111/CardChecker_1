@@ -1174,6 +1174,14 @@ if STATIC_DIR.exists():
     async def scan_2_page():
         return FileResponse(str(STATIC_DIR / "scan_2.html"))
 
+    @app.get("/privacy-policy", include_in_schema=False)
+    async def privacy_policy_page():
+        return FileResponse(str(STATIC_DIR / "privacy-policy.html"))
+
+    @app.get("/terms-of-service", include_in_schema=False)
+    async def terms_of_service_page():
+        return FileResponse(str(STATIC_DIR / "terms-of-service.html"))
+
 
 if __name__ == "__main__":
     uvicorn.run("src.api:app", host="0.0.0.0", port=8000, reload=True)
