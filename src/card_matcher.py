@@ -361,14 +361,17 @@ class CardMatcher:
         return []
 
     def _query_number_and_code(self, number: int, set_code: str, lang: str | None = None) -> list[dict]:
-        """Most specific: number + printed set code (e.g. 57 + SSP)."""
+        """Most specific: number + printed set code (e.g. 57 + SSP).
+        Results sorted by language priority (JP > EN > TW)."""
         sql = _SELECT_SQL + " WHERE c.collector_number = ? AND UPPER(s.abbreviation) = UPPER(?)"
         params: list = [number, set_code]
         if lang:
             sql += " AND c.language = ?"
             params.append(lang)
         rows = self.conn.execute(sql, params).fetchall()
-        return [_row_to_dict(r) for r in rows]
+        result = [_row_to_dict(r) for r in rows]
+        result.sort(key=_lang_priority)
+        return result
 
     def _query_number_total_lang(self, number: int, total: int, lang: str) -> list[dict]:
         """Number + total + language — the best strategy for JP/TW cards."""
@@ -382,14 +385,17 @@ class CardMatcher:
         return [_row_to_dict(r) for r in rows]
 
     def _query_number_and_total(self, number: int, total: int) -> list[dict]:
-        """Number + total cards in set (e.g. 57/191). Searches all languages."""
+        """Number + total cards in set (e.g. 57/191). Searches all languages.
+        Results sorted by language priority (JP > EN > TW)."""
         rows = self.conn.execute(
             _SELECT_SQL + """
             WHERE c.collector_number = ?
               AND (c.set_total = ? OR s.card_count_official = ?)""",
             (number, total, total),
         ).fetchall()
-        return [_row_to_dict(r) for r in rows]
+        result = [_row_to_dict(r) for r in rows]
+        result.sort(key=_lang_priority)
+        return result
 
     def _query_number_only(self, number: int, lang: str | None = None) -> list[dict]:
         """Just the collector number — broader results."""
@@ -564,6 +570,8 @@ class CardMatcher:
             rows = self.conn.execute(sql, params).fetchall()
             if rows:
                 refined = [_row_to_dict(r) for r in rows]
+                # Prefer JP over TW when visually identical
+                refined.sort(key=_lang_priority)
                 c = refined[0]
                 print(f"[match] CLIP+OCR cross-match: {c.get('name', '')} "
                       f"#{c.get('collector_number', '')}/{c.get('set_total', '')} "
