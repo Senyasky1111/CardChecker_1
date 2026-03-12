@@ -1,93 +1,114 @@
-# CardChecker — Pokemon Card Scanner & Pricer
+# CardChecker — Pokemon Card Scanner, Grader & Pricer
 
 ## What This Does
 
-Scan a Pokemon card with a photo → identify it → get market price from CardMarket.
+Scan a Pokemon card → identify it → grade condition → get market prices. Supports EN/JP/TW cards (50K+ total).
 
-## Pipeline
+## Architecture Overview
 
 ```
-Photo → CLIP Embedding → FAISS Search → Card ID → Price Lookup → Response
+                    ┌─────────────┐
+                    │  Mobile App │  (React Native / Expo)
+                    └──────┬──────┘
+                           │ REST API
+                    ┌──────▼──────┐
+                    │   FastAPI   │  src/api.py
+                    └──────┬──────┘
+              ┌────────────┼────────────┐
+              ▼            ▼            ▼
+        ┌──────────┐ ┌──────────┐ ┌──────────┐
+        │ Identify │ │  Grade   │ │  Pricing │
+        └────┬─────┘ └────┬─────┘ └────┬─────┘
+             │            │            │
+   Detection → OCR    Gemini Vision   CardMarket
+   → SQL Match         4 pillars     + PokeTrace
+   → CLIP fallback    PSA-style 1-10  + Pokemon API
 ```
 
-## Tech Stack
+## Three Domains (use `/command` skills for deep context)
 
-- Python 3.11+
-- CLIP (`openai/clip-vit-base-patch32`) — 512-dim image embeddings
-- FAISS — fast similarity search
-- FastAPI — REST API
-- Data source: CardMarket (official CSVs + scraped images)
+### `/card-engine` — Recognition & Pricing
+- **Detection**: OpenCV contours + YOLO-pose, outputs 600x825 warped image
+- **Identification**: OCR → 5-level SQL lookup → CLIP/FAISS fallback
+- **Pricing**: CardMarket (idProduct redirect for EN, search URL for JP/TW)
+- **Database**: SQLite, 22K EN + 15K JP + 12K TW cards, daily price snapshots
+- **API**: 7 endpoints, `/identify-v2` preferred (~100ms)
+
+### `/defect-grader` — Condition Analysis
+- **Grading**: Gemini 2.5 Flash, PSA-style 1-10 scale
+- **4 Pillars**: Centering, Corners, Edges, Surface (front 65% + back 35%)
+- **Defects**: type + location + severity + visibility per defect
+- **Roadmap**: OpenCV defect detection, calibration dataset, multi-model ensemble
+
+### `/mobile-dev` — Mobile App
+- **Stack**: React Native 0.81.5, Expo SDK 54, TypeScript strict
+- **State**: 6 Zustand stores with AsyncStorage persistence
+- **Features**: scan, collection, grading, market/watchlist, i18n (en/de/fr)
+- **Missing**: real auth, live price polling, push notifications, cloud sync
 
 ## Project Structure
 
 ```
 CardRecognition/
-├── scripts/
-│   ├── download_cardmarket_csvs.py   # Step 1: get card catalog + prices
-│   ├── scrape_cardmarket_images.py   # Step 2: download card images
-│   └── build_embedding_index.py      # Step 3: build CLIP+FAISS index
-├── src/
-│   ├── recognizer.py                 # CardRecognizer class
-│   └── api.py                        # FastAPI server
-├── tests/
-│   └── test_recognizer.py
-├── data/cardmarket/                  # Downloaded data (gitignored)
-│   ├── product_catalog.csv
-│   ├── price_guide.csv
-│   ├── cards_with_prices.json
-│   └── images/*.jpg
-├── models/card_index/                # Built index (gitignored)
-│   ├── cards.faiss
-│   └── metadata.pkl
-├── requirements.txt
-└── CLAUDE.md
+├── src/                        # Backend Python
+│   ├── api.py                  # FastAPI server (all endpoints)
+│   ├── card_matcher.py         # OCR+SQL+CLIP matching pipeline
+│   ├── card_detector.py        # OpenCV card detection
+│   ├── yolo_card_detector.py   # YOLO-pose detection
+│   ├── ocr.py                  # Tesseract/EasyOCR extraction
+│   ├── recognizer.py           # CLIP-based recognizer (legacy)
+│   ├── cardmarket_url.py       # Marketplace URL generation
+│   ├── gemini_grade.py         # AI grading (Gemini Vision)
+│   ├── gemini_identify.py      # Gemini-based identification
+│   ├── text_index.py           # Text-based card search
+│   ├── db.py                   # SQLite schema + queries
+│   └── config.py               # Configuration
+├── mobile/                     # React Native app
+│   ├── app/                    # Expo Router screens
+│   ├── src/                    # Components, stores, hooks, API, theme
+│   └── package.json
+├── scripts/                    # Data pipeline scripts
+├── data/                       # Cards DB, images (gitignored)
+├── models/                     # CLIP index, YOLO model (gitignored)
+├── .claude/commands/           # Skill files for Claude Code agents
+│   ├── card-engine.md
+│   ├── defect-grader.md
+│   └── mobile-dev.md
+└── CLAUDE.md                   # This file
 ```
 
-## How to Run (Step by Step)
+## Quick Start
 
 ```bash
-# 1. Create venv & install deps
-py -3.11 -m venv venv
-venv\Scripts\activate          # Windows
-pip install -r requirements.txt
+# Backend
+./venv/Scripts/python.exe -m uvicorn src.api:app --host 0.0.0.0 --port 8000
 
-# 2. Download CardMarket CSVs (catalog + prices)
-#    NOTE: CardMarket is behind Cloudflare.
-#    Download manually from https://www.cardmarket.com/en/Pokemon/Data/Download
-#    Save as: data/cardmarket/product_catalog.csv  and  data/cardmarket/price_guide.csv
-#    Then run the script to filter/merge:
-python scripts/download_cardmarket_csvs.py
-
-# 3. Download card images via Pokemon TCG API (free, legal, HD)
-python scripts/download_images_pokemontcg.py
-
-# 4. Build CLIP embedding index
-python scripts/build_embedding_index.py
-
-# 5. Start API server
-python src/api.py
-# → http://localhost:8000
-# → Docs: http://localhost:8000/docs
+# Mobile
+cd mobile && npx expo start
 ```
 
 ## API Endpoints
 
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/health` | Index stats, model info |
-| POST | `/identify` | Upload photo → top match + alternatives + prices |
-| GET | `/card/{id}` | Card details by CardMarket product ID |
+| POST | `/identify-v2` | OCR+SQL identification (~100ms) — **preferred** |
+| POST | `/identify` | Legacy CLIP identification (~1s) |
+| POST | `/detect-card` | Card detection + perspective correction |
+| POST | `/detect-number` | OCR number extraction only |
+| GET | `/card/{id}` | Card details + pricing |
+| GET | `/card/{tcgdex_id}/prices` | Multi-source pricing |
+| POST | `/gemini/identify` | Gemini Vision identification |
+| POST | `/gemini/grade` | AI condition grading (front + optional back) |
 
-## Scope (MVP)
+## Deployment
 
-- **2025 sets only** (~60 expansions, ~7-8K cards)
-- CardMarket scraping with rate limiting (1.5s delay, 3 workers)
-- JSON files for data storage (no DB needed for this scale)
-- Multi-crop recognition for better accuracy
+- **Production**: Hetzner 89.167.31.124, Docker at /opt/cardcheck/
+- **Local Python**: always use `./venv/Scripts/python.exe` (has all deps)
+- **Database**: SQLite WAL at data/cards.db (352MB)
 
-## Key Design Decisions
+## Current Priorities
 
-- Embeddings are L2-normalised → cosine similarity via inner product
-- Multi-crop voting: original + 90% crop + 80% crop → more robust
-- Scraper is resumable: skips already-downloaded images
-- Small index (<10K) uses `IndexFlatIP` (exact search); larger uses IVF
+1. Defect detection: add OpenCV layer to supplement Gemini grading
+2. Mobile: real auth + cloud sync
+3. Recognition: improve JP/TW OCR accuracy
+4. Pricing: live price updates instead of daily snapshots
