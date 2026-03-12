@@ -59,5 +59,6 @@ test_result.json
 # Mobile app (separate repo)
 mobile/
 
-# Claude settings
-.claude/
+# Claude settings (allow commands/ for shared skills)
+.claude/*
+!.claude/commands/
