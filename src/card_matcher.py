@@ -171,7 +171,7 @@ class CardMatcher:
             # Use the warped (perspective-corrected) image when available —
             # the original photo includes background/sleeve/glare which
             # confuses CLIP embeddings.
-            clip_result = self._clip_fallback(card_image)
+            clip_result = self._clip_fallback(card_image, ocr_result=ocr_result)
             if clip_result:
                 clip_result = self._refine_clip_with_ocr_number(
                     clip_result, ocr_result
@@ -205,14 +205,14 @@ class CardMatcher:
                 if name_score < 55:
                     # Name doesn't match — OCR is likely garbage.
                     # Ask CLIP to verify or find the real card.
-                    clip_results = self._clip_fallback(card_image)
+                    clip_results = self._clip_fallback(card_image, ocr_result=ocr_result)
                     if clip_results:
                         clip_results = self._refine_clip_with_ocr_number(
                             clip_results, ocr_result
                         )
                         print(f"[match] Single-candidate safety net: "
                               f"name score {name_score} < 55, "
-                              f"CLIP → {clip_results[0].get('name', '')}")
+                              f"CLIP -> {clip_results[0].get('name', '')}")
                         result.success = True
                         result.method = "clip_only"
                         result.card = clip_results[0]
@@ -256,7 +256,7 @@ class CardMatcher:
             # Trust CLIP visual search directly — don't compare against the
             # garbage OCR name since neither SQL nor CLIP results will match it.
             if top_score < 55 and self._recognizer:
-                clip_results = self._clip_fallback(card_image)
+                clip_results = self._clip_fallback(card_image, ocr_result=ocr_result)
                 if clip_results:
                     clip_results = self._refine_clip_with_ocr_number(
                         clip_results, ocr_result
@@ -477,50 +477,69 @@ class CardMatcher:
     # CLIP fallback & visual verification
     # ------------------------------------------------------------------
 
-    def _clip_fallback(self, query_image: Image.Image, k: int = 5) -> list[dict]:
+    def _clip_fallback(
+        self, query_image: Image.Image, k: int = 5,
+        ocr_result: "CardOCRResult | None" = None,
+    ) -> list[dict]:
         """
         Pure CLIP visual search when OCR fails completely.
 
-        Uses FAISS index to find visually similar cards, then fetches
-        their full data from SQL for consistent response format.
+        Uses multi-crop voting (3 crops) with preprocessing for robustness.
+        Returns empty list if best confidence < threshold (forces Gemini fallback).
         """
         if not self._recognizer:
             return []
 
+        CONFIDENCE_THRESHOLD = 0.40
+
         try:
             import faiss as _faiss
 
-            emb = self._recognizer._embed_image(query_image)
-            query = emb.astype(np.float32).reshape(1, -1)
-            _faiss.normalize_L2(query)
+            # Extract OCR signals for pre-filtering
+            collector_number = None
+            language = None
+            if ocr_result and ocr_result.collector_number:
+                collector_number = ocr_result.collector_number.number
+            if ocr_result:
+                language = ocr_result.detected_language
 
-            scores, indices = self._recognizer.index.search(query, k * 3)
+            # Single-shot CLIP search (no multi-crop voting — voting
+            # causes false positives when JP/TW duplicates outscore the
+            # correct EN card across crops).
+            emb = self._recognizer._embed_image(query_image, preprocess=False)
 
-            seen_tcgdex: set[str] = set()
+            hits = self._recognizer.search_filtered(
+                emb,
+                collector_number=collector_number,
+                language=language,
+                k=k * 3,
+            )
+
+            if not hits:
+                return []
+
+            # Confidence threshold — prevent garbage matches
+            best_score = hits[0][0]
+            if best_score < CONFIDENCE_THRESHOLD:
+                print(f"[match] CLIP fallback: best score {best_score:.3f} "
+                      f"< threshold {CONFIDENCE_THRESHOLD}, rejecting")
+                return []
+
+            # Fetch full card data from SQL (deduplicate by tcgdex_id)
+            seen: set[str] = set()
             results: list[dict] = []
-
-            for score, idx in zip(scores[0], indices[0]):
-                if idx < 0:
-                    continue
-                idx = int(idx)
-
-                # Get tcgdex_id from FAISS metadata
+            for score, idx in hits:
                 card_meta = self._recognizer.cards_by_idx.get(idx, {})
                 tcgdex_id = card_meta.get("_tcgdex_id", "")
-                if not tcgdex_id:
+                if not tcgdex_id or tcgdex_id in seen:
                     continue
-                if tcgdex_id in seen_tcgdex:
-                    continue
-                seen_tcgdex.add(tcgdex_id)
-
-                # Fetch full card data from SQL
+                seen.add(tcgdex_id)
                 row = self.conn.execute(
                     _SELECT_SQL + " WHERE c.tcgdex_id = ? LIMIT 1",
                     (tcgdex_id,),
                 ).fetchone()
                 if row:
                     results.append(_row_to_dict(row))
-
                 if len(results) >= k:
                     break
 
@@ -584,49 +603,38 @@ class CardMatcher:
         """
         Rerank candidates using CLIP visual similarity.
 
-        Used when multiple candidates match (same name across sets, same number
-        across languages, etc.). Compares the uploaded photo against each
-        candidate's stored image using CLIP embeddings.
+        Uses pre-computed FAISS embeddings (via index.reconstruct) instead of
+        loading images from disk. This is instant, works for all languages,
+        and uses the exact same embeddings that FAISS search uses.
 
-        Falls back to original order if CLIP is not available or images can't be loaded.
+        Falls back to original order if CLIP is not available.
         """
         if not self._recognizer or len(candidates) <= 1:
             return candidates
 
         try:
+            # Build tcgdex_id → FAISS index mapping (cached after first call)
+            if not hasattr(self._recognizer, '_tcgdex_to_faiss_idx'):
+                self._recognizer._tcgdex_to_faiss_idx = {}
+                for idx, card in self._recognizer.cards_by_idx.items():
+                    tid = card.get("_tcgdex_id", "")
+                    if tid:
+                        self._recognizer._tcgdex_to_faiss_idx[tid] = idx
+
             # Get CLIP embedding of the uploaded photo
-            query_emb = self._recognizer._embed_image(query_image)
+            query_emb = self._recognizer._embed_image(query_image, preprocess=False)
 
             scored = []
             for c in candidates:
-                # Try to load the candidate's local image
-                local_path = c.get("image_local", "")
-                if not local_path:
-                    scored.append((0.0, c))
-                    continue
+                tcgdex_id = c.get("tcgdex_id", "")
+                faiss_idx = self._recognizer._tcgdex_to_faiss_idx.get(tcgdex_id)
 
-                img_path = Path(local_path)
-                if not img_path.is_absolute():
-                    # Try common base directories
-                    for base in [Path("."), Path("data/cardmarket")]:
-                        candidate_path = base / local_path
-                        if candidate_path.exists():
-                            img_path = candidate_path
-                            break
-                    else:
-                        img_path = Path(".") / local_path
-
-                if not img_path.exists():
-                    scored.append((0.0, c))
-                    continue
-
-                try:
-                    cand_image = Image.open(img_path).convert("RGB")
-                    cand_emb = self._recognizer._embed_image(cand_image)
-                    # Cosine similarity (embeddings are L2-normalized)
+                if faiss_idx is not None:
+                    # Use pre-computed embedding from FAISS — O(1), no disk I/O
+                    cand_emb = self._recognizer.index.reconstruct(int(faiss_idx))
                     similarity = float(np.dot(query_emb, cand_emb))
                     scored.append((similarity, c))
-                except Exception:
+                else:
                     scored.append((0.0, c))
 
             # Sort by CLIP similarity (highest first), prefer JP over TW on ties

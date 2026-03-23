@@ -34,7 +34,9 @@ IMAGES_DIR = DATA_DIR / "images"
 INDEX_DIR = Path("./models/card_index")
 INDEX_DIR.mkdir(parents=True, exist_ok=True)
 
-MODEL_NAME = "openai/clip-vit-base-patch32"  # 512-dim embeddings
+# Model choice: ViT-L/14 (768-dim) is significantly more accurate than ViT-B/32 (512-dim)
+# for fine-grained card art distinction. Use --model flag to override.
+MODEL_NAME = "openai/clip-vit-large-patch14"  # 768-dim embeddings
 
 
 class CLIPEmbedder:
@@ -46,7 +48,7 @@ class CLIPEmbedder:
 
         print(f"Loading {model_name}...")
         self.model = CLIPModel.from_pretrained(model_name).to(self.device)
-        self.processor = CLIPProcessor.from_pretrained(model_name)
+        self.processor = CLIPProcessor.from_pretrained(model_name, use_fast=False)
         self.model.eval()
 
         # Probe embedding dimension
@@ -106,6 +108,20 @@ def load_cards_with_images() -> tuple[list[dict], list[Path]]:
     FAISS index, all pointing to the same underlying card (for pricing).
     This way a Japanese card photo will match against the Japanese image.
     """
+    # Load collector numbers from SQLite (for CLIP pre-filtering in recognizer)
+    import sqlite3
+    _db_card_cache: dict[str, dict] = {}
+    db_path = Path("./data/cards.db")
+    if db_path.exists():
+        db_conn = sqlite3.connect(str(db_path))
+        db_conn.row_factory = sqlite3.Row
+        for row in db_conn.execute(
+            "SELECT tcgdex_id, collector_number, set_total, language FROM cards"
+        ):
+            _db_card_cache[row["tcgdex_id"]] = dict(row)
+        db_conn.close()
+        print(f"Loaded {len(_db_card_cache)} cards from DB for metadata enrichment")
+
     # Load CardMarket data if available (for price info)
     cm_cards: dict[int, dict] = {}
     cm_file = DATA_DIR / "cards_with_prices.json"
@@ -162,6 +178,13 @@ def load_cards_with_images() -> tuple[list[dict], list[Path]]:
             card["_image_lang"] = lang
             card["_image_set"] = set_id
             card["_tcgdex_id"] = tcgdex_id
+
+            # Enrich with collector number from DB (for CLIP pre-filtering)
+            db_card = _db_card_cache.get(tcgdex_id, {})
+            card["_printed_number"] = db_card.get("collector_number")
+            card["_printed_total"] = db_card.get("set_total")
+            card["_printed_set_code"] = set_id
+            card["_language"] = db_card.get("language", lang)
 
             cards_ok.append(card)
             paths.append(img)
@@ -380,7 +403,15 @@ def main() -> None:
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--no-dedup", action="store_true",
                         help="Skip deduplication (keep all image variants)")
+    parser.add_argument("--model", type=str, default=None,
+                        help="Custom model path (e.g. models/clip_finetuned)")
     args = parser.parse_args()
+
+    # Allow overriding model via --model flag (for fine-tuned models)
+    global MODEL_NAME
+    if args.model:
+        MODEL_NAME = args.model
+        print(f"Using custom model: {MODEL_NAME}")
 
     print("=" * 60)
     print("Building Card Embedding Index")

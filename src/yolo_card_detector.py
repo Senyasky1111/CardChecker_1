@@ -28,6 +28,7 @@ from src.card_detector import (
     CARD_H,
     CARD_W,
     DetectionResult,
+    check_passthrough,
     order_corners,
     visualize_detection,
     warp_card,
@@ -119,6 +120,11 @@ class YOLOCardDetector:
         Returns:
             DetectionResult with corners, warped card, confidence, method="yolo".
         """
+        # Skip detection for already-cropped card images
+        pt = check_passthrough(image)
+        if pt is not None:
+            return pt
+
         img_rgb = np.array(image.convert("RGB"))
         orig_h, orig_w = img_rgb.shape[:2]
 

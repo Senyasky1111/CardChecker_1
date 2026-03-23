@@ -27,6 +27,29 @@ CARD_H = 825
 CARD_ASPECT = 63 / 88  # width / height ≈ 0.716
 
 
+def check_passthrough(image: Image.Image) -> "DetectionResult | None":
+    """Return a passthrough result if the image is already a clean card crop.
+
+    Checks aspect ratio (within ±5% of card ratio) and resolution (350-900px wide).
+    If matched, returns a simple LANCZOS resize instead of running detection.
+    """
+    w, h = image.size
+    if h == 0:
+        return None
+    aspect = w / h
+    if abs(aspect - CARD_ASPECT) < 0.05 and 350 <= w <= 900:
+        warped = image.resize((CARD_W, CARD_H), Image.LANCZOS)
+        corners = np.array([[0, 0], [w, 0], [w, h], [0, h]], dtype=np.float32)
+        return DetectionResult(
+            corners=corners,
+            confidence=1.0,
+            method="passthrough",
+            card_found=True,
+            warped=warped,
+        )
+    return None
+
+
 @dataclass
 class DetectionResult:
     """Result of card detection in an image."""
@@ -83,7 +106,7 @@ def warp_card(img: np.ndarray, corners: np.ndarray) -> Image.Image:
         dtype=np.float32,
     )
     M = cv2.getPerspectiveTransform(ordered, dst)
-    warped = cv2.warpPerspective(img, M, (CARD_W, CARD_H))
+    warped = cv2.warpPerspective(img, M, (CARD_W, CARD_H), flags=cv2.INTER_LANCZOS4)
     return Image.fromarray(warped)
 
 
@@ -134,13 +157,24 @@ def get_detector(backend: str = "auto"):
     Create a card detector with the specified backend.
 
     Args:
-        backend: "auto" (try YOLO, fallback to OpenCV), "yolo", or "opencv"
+        backend: "auto" (try DocTR, then YOLO, fallback to OpenCV),
+                 "doctr", "yolo", or "opencv"
 
     Returns:
-        CardDetector or YOLOCardDetector instance
+        DocTRCardDetector, YOLOCardDetector, or CardDetector instance
     """
     if backend == "opencv":
         return CardDetector()
+
+    if backend in ("doctr", "auto"):
+        try:
+            from src.doctr_detector import DocTRCardDetector
+            detector = DocTRCardDetector()
+            return detector
+        except (ImportError, Exception) as e:
+            if backend == "doctr":
+                raise
+            print(f"DocTR detector not available ({e}), trying YOLO.")
 
     if backend in ("yolo", "auto"):
         try:
@@ -171,6 +205,11 @@ class CardDetector:
         Tries contour detection first, then Hough lines, then fallback.
         Always returns a DetectionResult with a warped image.
         """
+        # Skip detection for already-cropped card images
+        pt = check_passthrough(image)
+        if pt is not None:
+            return pt
+
         img = np.array(image.convert("RGB"))
 
         # Strategy 1: Contour-based (multi-preprocessing)

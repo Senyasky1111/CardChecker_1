@@ -71,6 +71,84 @@ class CardRecognizer:
         self._ocr = None
         self._text_index = None
 
+    def _build_number_lookup(self) -> None:
+        """Build collector_number → [faiss_indices] mapping from metadata.
+
+        Parses collector number from _tcgdex_id (e.g. 'sv08-228' → 228)
+        since _printed_number may be None in older metadata.
+        """
+        from collections import defaultdict
+        self._number_to_indices: dict[int, list[int]] = defaultdict(list)
+        self._number_lang_to_indices: dict[tuple, list[int]] = defaultdict(list)
+
+        for idx, card in self.cards_by_idx.items():
+            # Try _printed_number first, fall back to parsing tcgdex_id
+            num = card.get("_printed_number")
+            if num is None:
+                tcgdex_id = card.get("_tcgdex_id", "")
+                if "-" not in tcgdex_id:
+                    continue
+                num_part = tcgdex_id.rsplit("-", 1)[1]
+                try:
+                    num = int(num_part)
+                except ValueError:
+                    continue
+
+            lang = card.get("_image_lang", "en")
+            self._number_to_indices[num].append(idx)
+            self._number_lang_to_indices[(num, lang)].append(idx)
+
+        print(f"[recognizer] Number lookup: {len(self._number_to_indices)} "
+              f"unique numbers, avg {np.mean([len(v) for v in self._number_to_indices.values()]):.0f} cards/number")
+
+    def search_filtered(
+        self,
+        query_embedding: np.ndarray,
+        collector_number: int | None = None,
+        language: str | None = None,
+        k: int = 5,
+    ) -> list[tuple[float, int]]:
+        """CLIP search with optional collector-number pre-filtering.
+
+        When a collector number is available, narrows search from 55K to
+        ~24-57 candidates using direct embedding comparison instead of
+        full FAISS search.
+
+        Returns list of (similarity_score, faiss_index) tuples.
+        """
+        query = query_embedding.astype(np.float32).reshape(1, -1)
+        faiss.normalize_L2(query)
+
+        if collector_number is not None:
+            if not hasattr(self, '_number_to_indices'):
+                self._build_number_lookup()
+
+            # Get candidate FAISS indices for this number
+            if language:
+                candidates = self._number_lang_to_indices.get(
+                    (collector_number, language), []
+                )
+                # Broaden if language filter too narrow
+                if len(candidates) < 3:
+                    candidates = self._number_to_indices.get(collector_number, [])
+            else:
+                candidates = self._number_to_indices.get(collector_number, [])
+
+            if candidates and len(candidates) < 500:
+                # Small candidate set: direct similarity computation (faster than FAISS)
+                candidate_embeddings = np.array(
+                    [self.index.reconstruct(int(i)) for i in candidates],
+                    dtype=np.float32,
+                )
+                scores = (candidate_embeddings @ query.T).flatten()
+                top_k = min(k, len(scores))
+                top_indices = np.argsort(scores)[::-1][:top_k]
+                return [(float(scores[i]), candidates[i]) for i in top_indices]
+
+        # Fallback: full FAISS search
+        scores, indices = self.index.search(query, k * 3)
+        return [(float(s), int(i)) for s, i in zip(scores[0], indices[0]) if i >= 0]
+
     @property
     def ocr(self):
         """Lazy-load OCR engine on first use."""
@@ -111,7 +189,10 @@ class CardRecognizer:
 
         model_name = metadata.get("model_name", "openai/clip-vit-base-patch32")
         model = CLIPModel.from_pretrained(model_name).to(device)
-        processor = CLIPProcessor.from_pretrained(model_name)
+        # Index was built with the slow (pre-v4.50) image processor.
+        # The new fast processor gives slightly different pixel values,
+        # causing CLIP embeddings to drift and search accuracy to drop.
+        processor = CLIPProcessor.from_pretrained(model_name, use_fast=False)
         model.eval()
 
         return cls(index, metadata, model, processor, device)
@@ -120,7 +201,42 @@ class CardRecognizer:
     # Embedding
     # ------------------------------------------------------------------
 
-    def _embed_image(self, image: Image.Image) -> np.ndarray:
+    def _preprocess_query(self, image: Image.Image) -> Image.Image:
+        """Preprocess a query photo to better match clean database renders.
+
+        1. CLAHE contrast enhancement (reduces holographic glare)
+        2. Gray-world white balance
+        3. Pad to square with white padding (preserves card aspect ratio)
+        """
+        import cv2
+
+        img_np = np.array(image)
+
+        # 1. CLAHE on L channel (LAB color space)
+        lab = cv2.cvtColor(img_np, cv2.COLOR_RGB2LAB)
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        lab[:, :, 0] = clahe.apply(lab[:, :, 0])
+        img_np = cv2.cvtColor(lab, cv2.COLOR_LAB2RGB)
+
+        # 2. Gray-world white balance
+        avg = img_np.mean(axis=(0, 1))
+        avg_all = avg.mean()
+        scale = np.where(avg > 0, avg_all / avg, 1.0)
+        img_np = np.clip(img_np.astype(np.float32) * scale, 0, 255).astype(np.uint8)
+
+        # 3. Pad to square (preserves 600x825 aspect ratio instead of squashing)
+        h, w = img_np.shape[:2]
+        max_dim = max(h, w)
+        padded = np.full((max_dim, max_dim, 3), 255, dtype=np.uint8)
+        y_off = (max_dim - h) // 2
+        x_off = (max_dim - w) // 2
+        padded[y_off:y_off + h, x_off:x_off + w] = img_np
+
+        return Image.fromarray(padded)
+
+    def _embed_image(self, image: Image.Image, preprocess: bool = False) -> np.ndarray:
+        if preprocess:
+            image = self._preprocess_query(image)
         with torch.no_grad():
             inputs = self.processor(images=image, return_tensors="pt")
             pixel_values = inputs["pixel_values"].to(self.device)

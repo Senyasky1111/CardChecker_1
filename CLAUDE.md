@@ -25,7 +25,12 @@ Scan a Pokemon card → identify it → grade condition → get market prices. S
    → CLIP fallback    PSA-style 1-10  + Pokemon API
 ```
 
-## Three Domains (use `/command` skills for deep context)
+## Domains (use `/command` skills for deep context)
+
+### `/cv-expert` — Computer Vision & Deep Learning
+- **Role**: Senior CV/DL research engineer, finds SOTA approaches (2024-2026)
+- **Scope**: Classical CV + modern DL, benchmarking, ONNX optimization, training/fine-tuning
+- **Focus**: Detection, OCR, defect detection, image quality, model selection & deployment
 
 ### `/card-engine` — Recognition & Pricing
 - **Detection**: OpenCV contours + YOLO-pose, outputs 600x825 warped image
