@@ -1,13 +1,13 @@
 #!/usr/bin/env python
 """PostToolUse hook for CardChecker.
 
-When a Bash command that looks like a training invocation completes,
-emit a hint suggesting the user invoke the model-reviewer subagent on
-the freshest `runs/` folder. No auto-spawning — Claude sees the hint
-and decides.
+When a Bash command **actually invokes** a training script, emit a hint
+suggesting `/review-run <latest runs/ folder>`. Hint goes to Claude;
+no auto-spawn.
 
-Matches: train_yolo, train_defect_yolo, `yolo train`, finetune_clip,
-dinov2 train, lightning train.
+Hard rule: match only real invocations (python <script> | yolo train | etc),
+not commands that merely *mention* training keywords (git commit messages,
+echo, grep, cat, find...).
 """
 
 from __future__ import annotations
@@ -19,6 +19,42 @@ import re
 import sys
 
 
+# Verbs that read/quote text but never run training. Skip these wholesale
+# even if the command line contains training-script names.
+NON_EXECUTING_PREFIXES = (
+    "git ",
+    "echo ",
+    "cat ",
+    "grep ",
+    "rg ",
+    "head ",
+    "tail ",
+    "find ",
+    "ls ",
+    "less ",
+    "more ",
+    "diff ",
+    "sed ",
+    "awk ",
+)
+
+# Real training invocations. Anchored on the actual executable verb.
+TRAINING_PATTERNS = [
+    # python ... train_yolo*.py / train_defect_yolo*.py / finetune_clip*.py / dinov2*train*.py
+    # Use \w* trailing instead of \b — script names like train_yolo_card.py have
+    # word chars after the keyword and a strict \b would not match.
+    re.compile(
+        r"\b(?:python|python3|python\.exe)\b[^\n;&|]*?"
+        r"\b(?:train_yolo\w*|train_defect_yolo\w*|finetune_clip\w*|dinov2\w*train\w*)",
+        re.IGNORECASE,
+    ),
+    # `yolo train ...` (Ultralytics CLI)
+    re.compile(r"(?:^|[\s;&|])yolo\s+train\b", re.IGNORECASE),
+    # `lightning run ... train ...`
+    re.compile(r"(?:^|[\s;&|])lightning\s+(?:run\s+)?train\b", re.IGNORECASE),
+]
+
+
 def main() -> None:
     try:
         payload = json.load(sys.stdin)
@@ -26,14 +62,14 @@ def main() -> None:
         return
 
     tool_input = payload.get("tool_input", {}) or {}
-    cmd = tool_input.get("command", "") or ""
+    cmd = (tool_input.get("command", "") or "").lstrip()
 
-    pattern = re.compile(
-        r"\b(train_yolo|train_defect_yolo|finetune_clip|dinov2[^\s]*train|"
-        r"yolo\s+train|yolov8[^\s]*\s+train|lightning\s+train)\b",
-        re.IGNORECASE,
-    )
-    if not pattern.search(cmd):
+    # Cheap guard: read-only verbs never train anything.
+    cmd_lower = cmd.lower()
+    if any(cmd_lower.startswith(p) for p in NON_EXECUTING_PREFIXES):
+        return
+
+    if not any(p.search(cmd) for p in TRAINING_PATTERNS):
         return
 
     runs_dirs = sorted(
@@ -41,11 +77,11 @@ def main() -> None:
         key=os.path.getmtime,
         reverse=True,
     )
-    latest = runs_dirs[0].rstrip(os.sep) if runs_dirs else "runs/<exp>"
+    latest = runs_dirs[0].replace("\\", "/").rstrip("/") if runs_dirs else "runs/<exp>"
 
     hint = (
-        f"[training-detected] A training command appears to have run.\n"
-        f"When it finishes, audit it via:  /review-run {latest}\n"
+        f"[training-detected] A training invocation completed.\n"
+        f"Audit it via:  /review-run {latest}\n"
         f"That spawns the model-reviewer subagent for a read-only post-mortem."
     )
 

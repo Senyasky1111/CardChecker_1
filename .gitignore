@@ -65,6 +65,7 @@ mobile/
 !.claude/agents/
 !.claude/settings.json
 !.claude/hooks/
+.claude/hooks/_test_*.py
 
 # Debug / one-off artefacts at repo root
 /photo_*.jpg
