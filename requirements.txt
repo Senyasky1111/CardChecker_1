@@ -24,8 +24,9 @@ uvicorn>=0.23.0
 python-multipart>=0.0.6
 pydantic>=2.0.0
 
-# YOLO card detection (inference)
+# Card detection (inference)
 onnxruntime>=1.15.0
+python-doctr[torch]>=0.9.0  # DocTR text-based card detector (fallback)
 
 # YOLO card detection (training only — optional, not needed for inference)
 # ultralytics>=8.1.0

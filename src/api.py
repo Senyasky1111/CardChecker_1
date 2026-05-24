@@ -38,6 +38,7 @@ from pydantic import BaseModel
 from src.card_detector import get_detector, visualize_detection
 from src.card_matcher import CardMatcher, MatchResult
 from src.cardmarket_url import card_url
+from src.ebay_url import ebay_sold_url
 from src.ocr import CardOCR
 from src.recognizer import CardRecognizer
 from src.gemini_identify import GeminiIdentifier, GeminiIdentifyResult
@@ -199,6 +200,7 @@ class SQLCardMatch(BaseModel):
     graded_psa9: Optional[float] = None
     graded_cgc10: Optional[float] = None
     has_graded: bool = False
+    ebay_url: str = ""
 
 
 class IdentifyV2Response(BaseModel):
@@ -491,6 +493,9 @@ def _match_to_card(card: dict, locale: str = "en") -> SQLCardMatch:
     # PriceCharting URL
     pc_url = _build_pricecharting_url(card)
 
+    # eBay sold search URL
+    ebay_url = ebay_sold_url(card)
+
     # Enriched prices from prices_external
     tcgdex_id = card.get("tcgdex_id", "")
     enriched = _get_enriched_prices(tcgdex_id) if tcgdex_id else {}
@@ -516,6 +521,7 @@ def _match_to_card(card: dict, locale: str = "en") -> SQLCardMatch:
         tcgplayer_id=tcgplayer_id,
         tcgplayer_url=tcgplayer_url,
         pricecharting_url=pc_url,
+        ebay_url=ebay_url,
         price_usd=enriched.get("price_usd"),
         price_ebay_usd=enriched.get("price_ebay_usd"),
         graded_psa10=enriched.get("graded_psa10"),
@@ -787,6 +793,9 @@ async def get_card_prices(tcgdex_id: str):
     pc_url = _build_pricecharting_url(dict(card))
     if pc_url:
         links["pricecharting"] = pc_url
+    ebay_link = ebay_sold_url(dict(card))
+    if ebay_link:
+        links["ebay"] = ebay_link
 
     return PriceDetail(
         tcgdex_id=tcgdex_id,
@@ -799,6 +808,98 @@ async def get_card_prices(tcgdex_id: str):
         graded=graded,
         links=links,
         last_updated=last_updated,
+    )
+
+
+# ------------------------------------------------------------------
+# Price history endpoint
+# ------------------------------------------------------------------
+
+class PriceHistoryPoint(BaseModel):
+    date: str
+    avg: Optional[float] = None
+    low: Optional[float] = None
+    high: Optional[float] = None
+    sale_count: Optional[int] = None
+
+
+class PriceHistoryResponse(BaseModel):
+    tcgdex_id: str
+    marketplace: str
+    condition: str
+    country: str
+    data_points: list[PriceHistoryPoint] = []
+
+
+@app.get("/card/{tcgdex_id}/price-history", response_model=PriceHistoryResponse)
+async def get_price_history(
+    tcgdex_id: str,
+    marketplace: str = Query(default="cardmarket", description="cardmarket, tcgplayer, or ebay"),
+    condition: str = Query(default="NEAR_MINT", description="NEAR_MINT, AGGREGATED, PSA_10, etc."),
+    country: str = Query(default="ALL", description="ALL, DE, FR, ES, IT"),
+    days: int = Query(default=90, ge=1, le=365, description="Number of days of history"),
+):
+    """Get price history time series for a card.
+
+    Combines data from two sources:
+    1. price_history table — deep history from PokeTrace /history endpoint
+    2. prices_external table — our daily snapshots
+
+    Returns deduplicated data points sorted by date ascending.
+    """
+    matcher = _get_matcher()
+    conn = matcher.conn
+
+    # Verify card exists
+    card = conn.execute("SELECT tcgdex_id FROM cards WHERE tcgdex_id = ?", (tcgdex_id,)).fetchone()
+    if not card:
+        raise HTTPException(status_code=404, detail="Card not found")
+
+    # Source 1: price_history (deep history from PokeTrace)
+    points_map: dict[str, PriceHistoryPoint] = {}
+
+    try:
+        rows = conn.execute("""
+            SELECT date, avg, low, high, sale_count
+            FROM price_history
+            WHERE tcgdex_id = ? AND marketplace = ? AND condition = ?
+                  AND date >= date('now', '-' || ? || ' days')
+            ORDER BY date ASC
+        """, (tcgdex_id, marketplace, condition, days)).fetchall()
+        for r in rows:
+            points_map[r["date"]] = PriceHistoryPoint(
+                date=r["date"], avg=r["avg"], low=r["low"],
+                high=r["high"], sale_count=r["sale_count"],
+            )
+    except Exception:
+        pass  # Table may not exist yet on old DBs
+
+    # Source 2: prices_external (our daily snapshots — overwrite/fill gaps)
+    rows = conn.execute("""
+        SELECT snapshot_date, price_avg, price_low, price_high, sale_count
+        FROM prices_external
+        WHERE tcgdex_id = ? AND marketplace = ? AND condition = ? AND country = ?
+              AND snapshot_date >= date('now', '-' || ? || ' days')
+        ORDER BY snapshot_date ASC
+    """, (tcgdex_id, marketplace, condition, country, days)).fetchall()
+
+    for r in rows:
+        d = r["snapshot_date"]
+        # Prefer prices_external (our own snapshots) over poketrace history
+        points_map[d] = PriceHistoryPoint(
+            date=d, avg=r["price_avg"], low=r["price_low"],
+            high=r["price_high"], sale_count=r["sale_count"],
+        )
+
+    # Sort by date
+    data_points = sorted(points_map.values(), key=lambda p: p.date)
+
+    return PriceHistoryResponse(
+        tcgdex_id=tcgdex_id,
+        marketplace=marketplace,
+        condition=condition,
+        country=country,
+        data_points=data_points,
     )
 
 

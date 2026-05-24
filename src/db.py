@@ -116,6 +116,43 @@ CREATE TABLE IF NOT EXISTS prices_external (
 CREATE INDEX IF NOT EXISTS idx_pe_card ON prices_external(tcgdex_id);
 CREATE INDEX IF NOT EXISTS idx_pe_lookup ON prices_external(tcgdex_id, marketplace, condition);
 
+-- Deep price history from PokeTrace /history endpoint
+CREATE TABLE IF NOT EXISTS price_history (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    tcgdex_id   TEXT NOT NULL REFERENCES cards(tcgdex_id),
+    marketplace TEXT NOT NULL,
+    condition   TEXT NOT NULL,
+    date        TEXT NOT NULL,
+    avg         REAL,
+    low         REAL,
+    high        REAL,
+    sale_count  INTEGER,
+    median_7d   REAL,
+    median_30d  REAL,
+    source      TEXT DEFAULT 'poketrace',
+    UNIQUE(tcgdex_id, marketplace, condition, date)
+);
+CREATE INDEX IF NOT EXISTS idx_ph_card ON price_history(tcgdex_id);
+CREATE INDEX IF NOT EXISTS idx_ph_lookup ON price_history(tcgdex_id, marketplace, condition);
+
+-- eBay sold listings with direct URLs (Phase 2: PokeTrace Scale)
+CREATE TABLE IF NOT EXISTS ebay_sold_listings (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    tcgdex_id   TEXT NOT NULL REFERENCES cards(tcgdex_id),
+    listing_url TEXT NOT NULL,
+    title       TEXT DEFAULT '',
+    price       REAL NOT NULL,
+    currency    TEXT DEFAULT 'USD',
+    condition   TEXT DEFAULT '',
+    grader      TEXT DEFAULT '',
+    grade       TEXT DEFAULT '',
+    sold_at     TEXT DEFAULT '',
+    fetched_at  TEXT NOT NULL,
+    UNIQUE(tcgdex_id, listing_url)
+);
+CREATE INDEX IF NOT EXISTS idx_esl_card ON ebay_sold_listings(tcgdex_id);
+CREATE INDEX IF NOT EXISTS idx_esl_sold ON ebay_sold_listings(sold_at);
+
 -- Track enrichment script progress for resumability
 CREATE TABLE IF NOT EXISTS enrichment_runs (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,

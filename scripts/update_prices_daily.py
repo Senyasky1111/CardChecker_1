@@ -646,6 +646,133 @@ def _fix_pricecharting_urls(conn):
     print(f"  Fixed {fixed}/{len(rows)} PriceCharting URLs")
 
 
+# ── Step 6: PokeTrace Price History ──────────────────────────────────
+
+def update_price_history(conn, dry_run=False, max_cards=1000):
+    """Fetch deep price history from PokeTrace for high-value cards.
+
+    Uses GET /v1/cards/{poketrace_id}/prices/{tier}/history?period=90d
+    Available on Pro tier. One call per card, returns daily time series.
+
+    Only fetches cards with top_price_eur > 3 that haven't been fetched
+    in the last 7 days, up to max_cards per run.
+    """
+    print(f"\n=== Step 6: PokeTrace Price History (max {max_cards} cards) ===")
+
+    if dry_run:
+        print("  [DRY RUN] skipping")
+        return
+
+    # Create table if not exists (for old DBs without migration)
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS price_history (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            tcgdex_id   TEXT NOT NULL,
+            marketplace TEXT NOT NULL,
+            condition   TEXT NOT NULL,
+            date        TEXT NOT NULL,
+            avg         REAL,
+            low         REAL,
+            high        REAL,
+            sale_count  INTEGER,
+            median_7d   REAL,
+            median_30d  REAL,
+            source      TEXT DEFAULT 'poketrace',
+            UNIQUE(tcgdex_id, marketplace, condition, date)
+        );
+        CREATE INDEX IF NOT EXISTS idx_ph_card ON price_history(tcgdex_id);
+    """)
+
+    # Find high-value cards with PokeTrace IDs, not fetched recently
+    cards = conn.execute("""
+        SELECT e.tcgdex_id, e.poketrace_id
+        FROM card_external_ids e
+        JOIN cards c ON c.tcgdex_id = e.tcgdex_id
+        WHERE e.poketrace_id IS NOT NULL
+              AND e.poketrace_id != ''
+              AND (c.top_price_eur > 3 OR c.top_price_usd > 3)
+              AND e.tcgdex_id NOT IN (
+                  SELECT DISTINCT tcgdex_id FROM price_history
+                  WHERE date >= date('now', '-7 days')
+              )
+        ORDER BY COALESCE(c.top_price_eur, 0) + COALESCE(c.top_price_usd, 0) DESC
+        LIMIT ?
+    """, (max_cards,)).fetchall()
+
+    print(f"  Cards to fetch: {len(cards)}")
+    fetched = 0
+    rows_added = 0
+
+    for card in cards:
+        if pt_calls >= PT_LIMIT or pt_consecutive_429 >= PT_429_ABORT:
+            print(f"  API limit reached at {pt_calls} calls")
+            break
+
+        pt_id = card["poketrace_id"]
+        tcgdex_id = card["tcgdex_id"]
+
+        # Fetch EU market history (CardMarket + eBay)
+        data = pt_get(f"/cards/{pt_id}/prices/EU/history", {"period": "90d"})
+        if data and "data" in data:
+            for point in data["data"]:
+                date_str = (point.get("date") or "")[:10]
+                if not date_str:
+                    continue
+                source_mp = (point.get("source") or "").lower()
+                # Map PokeTrace source names to our marketplace names
+                mp = source_mp if source_mp in ("cardmarket", "ebay") else source_mp
+                if not mp:
+                    continue
+                try:
+                    conn.execute("""
+                        INSERT OR IGNORE INTO price_history
+                        (tcgdex_id, marketplace, condition, date, avg, low, high,
+                         sale_count, median_7d, median_30d, source)
+                        VALUES (?, ?, 'AGGREGATED', ?, ?, ?, ?, ?, ?, ?, 'poketrace')
+                    """, (
+                        tcgdex_id, mp, date_str,
+                        point.get("avg"), point.get("low"), point.get("high"),
+                        point.get("saleCount"), point.get("median3d"), point.get("median7d"),
+                    ))
+                    rows_added += 1
+                except Exception:
+                    pass
+
+        # Fetch US market history (TCGPlayer + eBay)
+        data_us = pt_get(f"/cards/{pt_id}/prices/US/history", {"period": "90d"})
+        if data_us and "data" in data_us:
+            for point in data_us["data"]:
+                date_str = (point.get("date") or "")[:10]
+                if not date_str:
+                    continue
+                source_mp = (point.get("source") or "").lower()
+                mp = source_mp if source_mp in ("tcgplayer", "ebay") else source_mp
+                if not mp:
+                    continue
+                try:
+                    conn.execute("""
+                        INSERT OR IGNORE INTO price_history
+                        (tcgdex_id, marketplace, condition, date, avg, low, high,
+                         sale_count, median_7d, median_30d, source)
+                        VALUES (?, ?, 'AGGREGATED', ?, ?, ?, ?, ?, ?, ?, 'poketrace')
+                    """, (
+                        tcgdex_id, mp, date_str,
+                        point.get("avg"), point.get("low"), point.get("high"),
+                        point.get("saleCount"), point.get("median3d"), point.get("median7d"),
+                    ))
+                    rows_added += 1
+                except Exception:
+                    pass
+
+        fetched += 1
+        if fetched % 50 == 0:
+            conn.commit()
+            print(f"  Progress: {fetched}/{len(cards)} cards, {rows_added} rows added")
+
+    conn.commit()
+    print(f"  Done: {fetched} cards fetched, {rows_added} history rows added")
+
+
 # ── Main ─────────────────────────────────────────────────────────────
 
 def main():
@@ -687,6 +814,10 @@ def main():
     # Step 5: Regenerate PriceCharting URLs for JP/TW (remove stale abbreviation codes)
     if run_all and not args.dry_run:
         _fix_pricecharting_urls(conn)
+
+    # Step 6: PokeTrace Price History (deep time series for high-value cards)
+    if (run_all or args.poketrace_only) and POKETRACE_API_KEY and not args.csv_only:
+        update_price_history(conn, dry_run=args.dry_run)
 
     elapsed = time.time() - t0
 
