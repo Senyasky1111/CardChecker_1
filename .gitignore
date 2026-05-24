@@ -67,6 +67,9 @@ mobile/
 !.claude/hooks/
 .claude/hooks/_test_*.py
 
+# Obsidian per-session state (not stable across editors / sessions)
+vault/.obsidian/workspace.json
+
 # Debug / one-off artefacts at repo root
 /photo_*.jpg
 /debug_*.jpg
