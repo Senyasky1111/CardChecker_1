@@ -59,6 +59,38 @@ test_result.json
 # Mobile app (separate repo)
 mobile/
 
-# Claude settings (allow commands/ for shared skills)
+# Claude settings (allow commands/, agents/, settings.json for shared skills)
 .claude/*
 !.claude/commands/
+!.claude/agents/
+!.claude/settings.json
+!.claude/hooks/
+.claude/hooks/_test_*.py
+
+# Obsidian per-session state (not stable across editors / sessions)
+vault/.obsidian/workspace.json
+
+# Debug / one-off artefacts at repo root
+/photo_*.jpg
+/debug_*.jpg
+/debug_*.py
+/_debug_*.jpg
+/test_image*.jpg
+/test_piplup*.jpg
+/yolo_*_debug.jpg
+/clip_debug.txt
+/test_100_results*.json
+
+# Stale archives at root (dataset/run snapshots)
+/*.zip
+
+# Obsidian config backups (keep live .obsidian/)
+/.obsidian.*.bak/
+/.obsidian.bak-pre-move/
+/.git.old-*-backup/
+
+# Debug snapshots collected under tests/ (not real tests)
+tests/corner_debug/
+tests/warp_compare/
+tests/warp_quality/
+tests/yolo_vs_opencv/

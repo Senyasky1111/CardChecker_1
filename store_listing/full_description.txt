@@ -1,0 +1,42 @@
+CardChecker is the ultimate AI-powered tool for trading card collectors. Scan any TCG card in any language, instantly get market prices from CardMarket, detect surface defects, and receive a professional-grade condition report — all from your phone.
+
+INSTANT CARD RECOGNITION
+Snap a photo or pick from your gallery. Our AI identifies your card in seconds — regardless of language. English, Japanese, Taiwanese, and more. Works with Pokemon TCG, with support for 50,000+ cards across all 2025 sets and expansions.
+
+REAL-TIME CARDMARKET PRICES
+Get live pricing pulled directly from CardMarket, Europe's largest TCG marketplace. See 30-day averages, 7-day trends, Near Mint floor prices, and direct links to the product page — so you always know exactly what your card is worth.
+
+AI DEFECT DETECTION
+CardChecker doesn't just identify your card — it inspects it. Our AI scans the surface for:
+- Edge whitening and corner chipping
+- Centering misalignment (X/Y axis precision)
+- Surface scratches and print defects
+- Each defect is pinpointed with location, type, and severity
+
+PROFESSIONAL CONDITION REPORTS
+Generate detailed, shareable grading reports with:
+- Annotated card images with defect overlays
+- PSA grade probability distribution (PSA 6–10)
+- Centering grid analysis
+- Defects table with severity breakdown
+- ROI calculator: know if grading is worth the cost
+- Public shareable link for buyers or trade partners
+
+COLLECTION MANAGER
+Build your digital card portfolio. Track total collection value, organize by set or rarity, sort and filter with ease. Grid and list views. Search across your entire collection instantly.
+
+PRICE WATCHLIST & ALERTS
+Track the cards you want. Set target prices, choose alert direction (above or below), and get notified when the market moves. Never overpay and never miss a deal.
+
+HOW IT WORKS
+1. Take a photo of any TCG card or select from gallery
+2. AI identifies the card and finds the CardMarket listing
+3. View real-time prices and market data
+4. Run a condition check to detect defects and centering issues
+5. Generate a full grading report with one tap
+6. Save to your collection or add to your watchlist
+
+BUILT FOR SERIOUS COLLECTORS
+Whether you're cracking packs at a tournament, checking prices at a flea market, grading your collection before submission, or verifying a card's condition before buying — CardChecker gives you professional-level insights in seconds.
+
+Free to use with optional premium features for power users.

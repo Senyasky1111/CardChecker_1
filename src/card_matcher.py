@@ -82,6 +82,7 @@ class CardMatcher:
         self._conn: Optional[sqlite3.Connection] = None
         self._ocr: Optional[CardOCR] = None
         self._detector = None  # Will be created via get_detector()
+        self._doctr_detector = None  # Lazy-loaded DocTR fallback
         self._recognizer = recognizer  # Optional CardRecognizer for CLIP verification
 
     @property
@@ -99,8 +100,20 @@ class CardMatcher:
     @property
     def detector(self):
         if self._detector is None:
-            self._detector = get_detector("auto")
+            self._detector = get_detector("yolo")
         return self._detector
+
+    @property
+    def doctr_detector(self):
+        """Lazy-load DocTR detector (only when YOLO OCR fails to find number)."""
+        if self._doctr_detector is None:
+            try:
+                from src.doctr_detector import DocTRCardDetector
+                self._doctr_detector = DocTRCardDetector()
+            except Exception as e:
+                print(f"DocTR fallback not available: {e}")
+                self._doctr_detector = False  # Mark as unavailable
+        return self._doctr_detector if self._doctr_detector is not False else None
 
     @property
     def card_count(self) -> int:
@@ -141,8 +154,22 @@ class CardMatcher:
             ocr_original = self.ocr.extract(image)
             if ocr_original.number_confidence > ocr_result.number_confidence:
                 ocr_result = ocr_original
-                # Keep warped image for CLIP (perspective-corrected is still
-                # better for visual matching), but use OCR from original.
+
+        # DocTR fallback: if YOLO didn't find collector number, re-detect
+        # with DocTR (better at sleeved/angled cards) and re-OCR.
+        if (
+            ocr_result.collector_number is None
+            and detection.method != "passthrough"
+            and self.doctr_detector is not None
+        ):
+            doctr_detection = self.doctr_detector.detect(image)
+            if doctr_detection.card_found and doctr_detection.warped is not None:
+                doctr_ocr = self.ocr.extract(doctr_detection.warped)
+                if (doctr_ocr.collector_number is not None
+                        or doctr_ocr.number_confidence > ocr_result.number_confidence):
+                    ocr_result = doctr_ocr
+                    card_image = doctr_detection.warped
+                    print("[match] DocTR fallback improved OCR")
 
         if ocr_result.name:
             result.ocr_name = ocr_result.name

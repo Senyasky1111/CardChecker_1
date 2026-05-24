@@ -27,3 +27,28 @@ services:
       resources:
         limits:
           memory: 6G
+
+  price-updater:
+    build: .
+    container_name: cardcheck-price-updater
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - ./data/cards.db:/app/data/cards.db
+      - ./data/cardmarket/cards_with_prices.json:/app/data/cardmarket/cards_with_prices.json
+      - ./data/cardmarket/price_guide.json:/app/data/cardmarket/price_guide.json
+    entrypoint: ["bash", "-c"]
+    command:
+      - |
+        apt-get update && apt-get install -y --no-install-recommends cron && rm -rf /var/lib/apt/lists/*
+        printenv | grep -E '^(POKETRACE_|POKEMON_API_|GEMINI_)' >> /etc/environment
+        echo '0 6 * * * cd /app && /usr/local/bin/python scripts/update_prices_daily.py >> /proc/1/fd/1 2>&1' | crontab -
+        echo "Cron scheduled: daily price update at 06:00 UTC"
+        cron -f
+    deploy:
+      resources:
+        limits:
+          memory: 2G
