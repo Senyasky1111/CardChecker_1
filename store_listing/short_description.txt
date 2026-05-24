@@ -1,0 +1,1 @@
+AI-powered TCG card scanner: detect defects, check prices, grade condition.
