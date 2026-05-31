@@ -36,7 +36,7 @@ tags: [moc, scraping, etl]
 См. [[../09-ml-research/_MOC]]:
 - YOLO synthetic dataset: [[../09-ml-research/yolo-card-detection/dataset]]
 - CLIP pairs: [[../09-ml-research/clip-finetuning/pairs-generation]]
-- Defect dataset (from TAG): [[../09-ml-research/defect-yolo/training]]
+- Defect dataset (from TAG) — live plan: [[../02-grading/defect-detection/architecture]] (ambitious, photometric/OBB/12-class). Old pragmatic note archived → [[../../40-Archive/superseded-plans/2026-05-23-defect-yolo-training-pragmatic]].
 
 ## Связанные
 

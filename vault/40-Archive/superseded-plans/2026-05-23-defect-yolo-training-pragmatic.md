@@ -1,10 +1,26 @@
 ---
 type: note
-status: in-progress
+status: superseded
+superseded-by: [[../../20-Areas/02-grading/defect-detection/architecture]]
+superseded-on: 2026-05-24
 area: [ml, grading]
-tags: [yolo, defect-detection, training]
+tags: [yolo, defect-detection, training, archived]
 created: 2026-05-23
-updated: 2026-05-23
+updated: 2026-05-24
+---
+
+# [ARCHIVED 2026-05-24] Defect YOLO — Pragmatic Training Plan (superseded)
+
+> ⚠️ **This plan was a pragmatic downgrade of the March 2026 architecture and is NOT the path forward.**
+>
+> The user rejected it on 2026-05-24 — final design must follow the ambitious
+> architecture.md: photometric stereo overlays as input channel, OBB-oriented
+> bounding boxes (not regular bbox), 12 defect classes, multi-angle capture,
+> defect masks. See [[../../20-Areas/02-grading/defect-detection/architecture]]
+> for the live plan.
+>
+> Kept for historical context: what we were *briefly* tempted to ship.
+
 ---
 
 # Defect YOLO — Training

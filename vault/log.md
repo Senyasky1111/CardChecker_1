@@ -13,6 +13,63 @@ Tags: `decision` `incident` `session` `release` `pivot` `experiment` `milestone`
 
 ---
 
+## [2026-05-24] milestone | v3.2 plan locked, build starts
+
+After 3 full validation rounds (12 reviewers) + stakeholder corrections + self-review on Round-4 new items (Round 4 agents timed out via Stream idle, not their fault), v3.2 is final.
+
+Stakeholder corrections layered on top of reviewer findings:
+- Defect classes stay at 7 (no split — keep simplicity, may revisit in v1.1)
+- Quality gate = soft warning flags, NOT block (graded slabs are always sleeved)
+- Output = grade + interval + full probability distribution over 19 buckets (1.0-10.0)
+- Centering: validate against TAG's 96 455 L/R + T/B ratios, fallback learned regression if MAE > 3%
+- Aggregator: fit on 1331 cards, validate end-to-end on 41 292 cards (NOT 100 hand-labeled)
+- Color invert as training aug p=0.3 + inference TTA on MAIN-only (×2 latency, ~+2% mAP)
+- Recognition-first conditioning: when card identified by CLIP+OCR+SQL, use DB metadata for finish/era/lang. Aux heads as fallback.
+- Targeted dozaliv: ~12 GB crop images for 1331 cards with per-zone scores
+- Tier-2 amendments (monitoring/RUNBOOK/continual-learning) deferred to v1.1 sprint after first train
+- Inference infrastructure: Modal serverless first (pay-per-grade), Hetzner GEX44 after 250 grades/day crossover
+
+Build starts now. Sequence:
+1. Section A1: rebuild converter `scripts/build_v3_dataset.py` (3-4h, $0)
+2. Sample-verify on 10 cards
+3. Full run on 96k
+4. /dataset-doctor verify
+5. Section A4: SAM2 bbox refinement (~$25-40, 4-6h H100 background)
+6. Section B1: DINOv3 SSL pretrain (~$40-50, 16h H100)
+7. Section C: detector + severity training (~$75-90)
+8. Eval against 41k TAG holdout
+9. Ship v1 to /grade-v2 endpoint via Modal serverless
+
+Canonical plan: [[../_context-packs/v3-defect-detection-plan]]. ADRs: [[../30-Resources/adr/2026-05-24-grade-aggregation-weakest-link]].
+
+## [2026-05-24] decision | defect-detection v3 plan locked after 3-reviewer validation
+
+Spawned 3 centralized research agents (cv-architect, data-strategist, domain-expert) to validate the v2 plan. All returned APPROVE-WITH-CHANGES with 9 amendments. Biggest finding: v2 plan cloned Ximilar's geomean aggregator instead of PSA's weakest-link rule — would have over-graded weak-pillar cards by 1-2 grade points systematically. Captured in new ADR [[../30-Resources/adr/2026-05-24-grade-aggregation-weakest-link]].
+
+Other key amendments locked into v3:
+- Class-conditional bbox (OBB only for scratch/crease, AABB for blobs)
+- RF-DETR vs DEIMv2 bake-off on 5k subset before $60-90 commit
+- Curriculum SFX-dropout p=0.5→0.2 + learnable SFX-presence token
+- SAM2 with HITL gate (auto-reject + 300-sample hand-verify)
+- GroupKFold (cert-prefix + pHash≤6 cluster + grade-bucket), NOT language/era stratification
+- Poisson aux head default OFF, 3-way A/B test
+- Severity buckets renamed to TAG vocab (clean/minor ding/major ding/disqualifying), thresholds anchored to TAG-published 950/990
+
+Budget revised: $171-241 (was $150-210). Tight against $200 user-cap.
+
+Data sufficiency verdict: v1 ships on current 67k cards / 10k severity patches. Two acknowledged risks — `disqualifying` undertraining (~300 samples) and TAG-studio→user-phone domain shift. Both measured in G3 eval (hand-photo benchmark set).
+
+Canonical plan: [[../_context-packs/v3-defect-detection-plan]].
+
+## [2026-05-24] decision | reaffirmed ambitious March-plan for defect detection
+
+Stakeholder rejected the pragmatic May 23 plan (`defect-yolo/training.md` — YOLOv11m + 7 classes + 640px + MAIN-only). Archived to `40-Archive/superseded-plans/2026-05-23-defect-yolo-training-pragmatic.md`. Canonical plan = `20-Areas/02-grading/defect-detection/architecture.md` (March 2026): YOLO26x-OBB, 12 classes, photometric stereo overlay as input channel, multi-angle capture (3-5 photos), defect masks, server-side GPU. Goal = max accuracy, real competitor to TAG/PSA AI-grading.
+
+Implications:
+- Scraper must dozalit DIG+ assets (920k depth PNGs + 2k annotated SFX + 40k defect crops + 120k corner crops currently undownloaded, all URLs live in metadata).
+- Mobile UI needs multi-angle capture flow (guided silhouette + arrow, panoramic-style).
+- GPU compute strategy needs re-decision — earlier "cloud-only $200 budget" was set against pragmatic plan; ambitious plan likely needs owned GPU on Hetzner per the original March decision.
+
 ## [2026-05-21] milestone | vault structure bootstrapped
 
 Consolidated scattered project folders into `D:\CardChecker\` as single source of truth (PARA + LYT MOCs + Karpathy LLM Wiki conventions). Vault skeleton created with 12 areas, 9 templates, MOCs in place. Fresh `.git` cloned from GitHub (Senyasky1111/CardChecker_1) after Desktop git objects were lost. TAG scraper data (96,551 certs, 423 GB) preserved intact at `data/tag_raw/`. See [[30-Resources/reference/obsidian-best-practices-research]] for the methodology.
@@ -88,3 +145,88 @@ Comprehensive vault gap-fill so future Claude sessions have full project context
 - **index.md rewritten** to reflect current state (~120 notes, 10 ADRs).
 
 Vault now ~120 structured notes. Convention going forward: every major decision → ADR same day; every new training run → experiments-log entry; new script → row in scripts-catalog.
+
+## [2026-05-24] decision | Q2 priorities re-ranked + new manual-search project
+
+Priority re-shuffle:
+- **#1 (new): Mobile auth + cloud sync** — promoted from #2. Reason: mock auth + AsyncStorage-only = tech debt block. Without real auth, no cloud sync, no Stripe, no subscription enforcement, data loss on reinstall — blocks monetization. Open decision: Firebase / Supabase / own (FastAPI+JWT). Default recommendation if no preference: Supabase.
+- **#2 (was #1): OpenCV defect detection** — still in-progress, demoted by one. Parallel track: consider upgrading Gemini Flash → stronger VLM (Gemini 2.5 Pro / Claude Opus 4.7 / GPT-5) as **interim improvement** until YOLO defect detector ships. Deliberation: [[20-Areas/02-grading/gemini-model-upgrade]].
+- **#3**: JP/TW OCR accuracy (unchanged).
+- **#4**: Live pricing (unchanged).
+- **#5 (NEW): Smart manual search** — feature added. Photo scanning isn't always convenient (sleeves, binders, weak light). User wants to type "096/080" or "Pikachu" or "Pikachu ex 199/197" and get matched. Competitors have search but it's dumb (text-only, no romanization, no combo parsing). Smart search = differentiator. See [[10-Projects/2026-Q2-manual-search]].
+
+Re-ranking does not abandon any project — only changes immediate-attention order.
+
+Created notes today: [[10-Projects/2026-Q2-manual-search]], [[20-Areas/02-grading/gemini-model-upgrade]]. Updated: 4 existing Q2 project notes + CLAUDE.md "Current Priorities".
+
+## [2026-05-24] milestone | reality check — vault was documenting a mobile product that doesn't exist
+
+After ~2 hours of work today on "Mobile auth + cloud sync" as #1 priority, user pushed back: "что за мобайл, у нас только веб". Investigation: the `mobile/` directory in this repo (full Expo SDK 54, 20 screens, 38 components) is **abandoned AI-generated prototype** — never the active product. Real product = **Base44 webapp** (`Senyasky1111/CardChecker_MVP`, ~10 users) + this repo (FastAPI backend + ML + scripts).
+
+Implications:
+- All 30+ mobile-related notes added during 2026-05-23 overhaul = noise for future Claude sessions. Need cleanup.
+- Project #1 (mobile auth) and related projects = nuked from priority list.
+- The auth deliberation (Base44 SDK direct vs proxy vs Supabase migration) — all moot, no mobile to wire.
+
+Investigated webapp `CardChecker_MVP` via agent. Found real critical bugs: Stripe webhook validation missing (money risk), blob URLs in CollectionItem/Report die on reload (data loss), Watchlist `current_price` hardcoded never polls (broken feature), ReportNew hidden by `ready: false` flag (80% complete unlock), PriceHistoryChart placeholder (recharts installed, endpoint missing).
+
+Revised Q2 priorities (in CLAUDE.md): #1 Stripe webhook, #2 blob → persistent storage, #3 watchlist polling, #4 unhide ReportNew, #5 manual search, then ML/OCR/Gemini upgrades.
+
+## [2026-05-24] milestone | multi-agent dev workflow infrastructure added
+
+Set up structured workflow for solo-dev development based on Anthropic patterns + 2026 community practices.
+
+**Added 5 subagents** in `.claude/agents/`:
+- `spec-writer` (Sonnet) — rough idea → structured TZ
+- `code-reviewer` (Sonnet) — read-only multi-aspect code review
+- `tester` (Sonnet) — writes/runs tests, can edit only test files
+- `ui-reviewer` (Sonnet) — accessibility + design system + responsive for webapp/mobile UI
+- `security-reviewer` (Opus) — auth/payment/input/secrets review
+
+**Added orchestrator** `/feature-flow <description>` in `.claude/commands/feature-flow.md` — runs the workflow: spec → user approval → implement → tester → code-reviewer → conditional ui-reviewer / security-reviewer → synthesis.
+
+**Enabled Agent Teams experimental** via `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` in `.claude/settings.json` — exposes `TeamCreate`, `SendMessage`, `TeamDelete` tools, allows spawning teams of subagents with direct inter-agent communication.
+
+**Convention**: domain skills (`/cv-expert`, `/card-engine`, `/defect-grader`, `/mobile-dev`, `/data-engineer`, `/ml-strategy`, `/train-coach`, `/dataset-doctor`) used inside the implementation stage of `/feature-flow` for deep context. Subagents handle review stages. Both layered together = the workflow user described ("команды агентов работают вместе, независимо проверяя друг-друга").
+
+First test target: TBD (candidates — Stripe webhook validation in webapp, or watchlist polling job in FastAPI backend).
+
+## [2026-05-24] milestone | first /feature-flow test — subscription management — workflow validated
+
+Ran the new `/feature-flow` end-to-end on a real webapp bug (user-reported): Account page showed legacy "CREDITS: 0" widget + no way to downgrade Plus/Pro → Free from UI. Scope expanded mid-flow on user clarification to **full any-tier↔any-tier management** with Stripe proration.
+
+**Stages executed**:
+1. **spec-writer** (Sonnet, background) — initially blocked by cross-repo permissions (sibling repo `D:\amotrychenko\Desktop\CardChecker_MVP\`). Worked around by inlining file contents in re-launch. Returned grounded 9-section spec with explicit risks + open questions.
+2. **Implementation** — 5 files edited, 1 new Deno function: `cancelSubscription` (idempotent cancel-at-period-end), `changeSubscription` (new — Stripe `subscriptions.update` with `create_prorations`), `useSubscription.jsx` (expose `cancelAtPeriodEnd` + `currentPeriodEnd`), `Pricing.jsx` (8-state button matrix), `Account.jsx` (remove Upgrade-to-Pro + Danger Zone, add cancellation banner + Change Plan/Billing buttons), `Layout.jsx` (sidebar Change Plan link to Pricing for all tiers).
+3. **tester** (Sonnet, background) — adapted to no-test-framework state. Produced structured manual test plan + 5 bugs (2 high, 3 minor). Recommended deferring Vitest setup until needed.
+4. **code-reviewer** (Sonnet, background, parallel with 3) — **independently confirmed bug #1** found by tester (changeSubscription not clearing cancel_at_period_end). Added 2 important + 5 minor findings.
+5. **ui-reviewer** (Sonnet, background, parallel with 6) — 3 critical a11y issues: amber-600 fails WCAG AA contrast on white, color-only status conveyance, disabled-button screen-reader gap. Plus 7 minor design system findings.
+6. **security-reviewer** (Opus, background, parallel with 5) — 0 block-merge, 3 high (immediate tier write race with 3DS payment fail, email-collision IDOR via Stripe customer lookup, status='active' missing trialing), 3 medium, 5 low. Found 3 real issues main session would have missed.
+7. **Synthesis + 12 fixes applied** across all reviewers.
+
+**Validation**: parallel reviewers found independent issues with **one cross-confirmation** (Bug 1 found by tester AND code-reviewer separately) — exactly the validation pattern the user described when asking to set this up.
+
+**Workflow gotchas discovered**:
+- Cross-repo subagent permissions blocked at first run. Resolved with `permissions.additionalDirectories` in settings.json + inline content fallback. Documented in [[../_context-packs/working-on-webapp]] (TBD) and memory.
+- Subagent restart needed for new permissions to apply mid-session.
+- Reviewers parallel ≠ Agent Team (which uses TeamCreate/SendMessage). Pure parallel subagents work fine for orthogonal review aspects without explicit communication.
+
+**Commit pushed**: `2c249bd` on `Senyasky1111/CardChecker_MVP` main branch. Pending: Base44 republish to deploy + user verification with Stripe Portal cancel test.
+
+## [2026-05-24] milestone | MCP servers configured (Base44 ready, Stripe pending)
+
+Set up project-level MCP integration to query Base44 datastore and Stripe directly from Claude sessions (eliminates screenshot-based debugging).
+
+**Files**:
+- `d:\CardChecker\.mcp.json` — Base44 HTTP MCP (`https://app.base44.com/mcp`, OAuth-authenticated). No secrets — committable.
+- `d:\CardChecker\.claude\settings.json` — added `enableAllProjectMcpServers: true` to auto-approve project MCPs.
+
+**Activation**: requires Claude Code restart. At first Base44 use → OAuth flow opens in browser. After auth, `list_user_apps`, `list_entity_schemas`, `query_entities`, `create_base44_app`, `edit_base44_app` tools available.
+
+**Stripe**: NOT in project repo (secret). User adds to global `~/.claude.json` via either:
+- CLI: `claude mcp add stripe --scope user -- npx -y @stripe/mcp --tools=all --api-key=KEY`
+- Manual edit `~/.claude.json`
+
+Recommended key: Stripe restricted key (read-only subscriptions/customers/invoices), or test mode key (sk_test_) for dev. NOT sk_live_ secret.
+
+**Net effect for future sessions**: instead of "show me the screenshot", Claude can directly check `User.subscription_tier`, `subscription.cancel_at_period_end`, `current_period_end`, invoice state — and proactively verify state after deploys.

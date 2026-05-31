@@ -7,6 +7,7 @@ priority: 4
 target: 2026-Q2
 area: [pricing, backend]
 tags: [pricing, live-updates, q2]
+updated: 2026-05-24
 related: [[../20-Areas/03-pricing/live-pricing-plan]]
 ---
 

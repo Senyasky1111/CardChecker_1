@@ -7,6 +7,7 @@ priority: 3
 target: 2026-Q2
 area: [recognition, ml]
 tags: [ocr, jp, tw, q2]
+updated: 2026-05-24
 related: [[../20-Areas/01-recognition/languages/jp-recognition]], [[../20-Areas/01-recognition/languages/tw-recognition]]
 ---
 

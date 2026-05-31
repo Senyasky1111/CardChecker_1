@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "base44": {
+      "type": "http",
+      "url": "https://app.base44.com/mcp"
+    }
+  }
+}

@@ -13,6 +13,17 @@ User-facing intro lives in [README.md](README.md). This file is the bootstrap co
 - [vault/log.md](vault/log.md) — append-only chronological journal
 - [README.md](README.md) — human-facing overview
 
+## Working principles (Karpathy-derived, 2026-05-30)
+
+For non-trivial work — anything you'd run through `/feature-flow`:
+
+- **Surface assumptions before coding.** If the request has >1 reasonable interpretation, list them and ask — don't pick silently and discover later that you built the wrong thing.
+- **Push back when you see a simpler path.** If the user asks for a 200-line refactor and 30 lines would do, say so before implementing the 200.
+- **Stop when confused.** Name what's unclear, ask one focused question. Don't paper over with plausible-looking code.
+- **Goal-driven for bugfixes.** Reproduce the bug as a failing test FIRST, then fix until green. Strong success criteria beat clarification loops.
+
+Skip this rigor for trivial work (typos, one-liners, doc tweaks) — judgment call.
+
 ## Architecture (one-liner)
 
 ```
@@ -32,6 +43,7 @@ Webapp (Base44) ──┼─→ FastAPI (src/api.py) → [Identify → Grade →
   ml-research, infrastructure, product, business.
 - [vault/30-Resources/](vault/30-Resources/) — `adr/`, `templates/`, `reference/`, `clippings/`
 - [vault/40-Archive/](vault/40-Archive/) — done projects, deprecated decisions
+- [vault/_sessions/](vault/_sessions/) — **per-session summaries**. Read latest entry first when starting new session to know what was done last. Raw transcripts live at `~/.claude/projects/d--CardChecker/*.jsonl` (Claude Code's own storage).
 - [vault/_context-packs/](vault/_context-packs/) — curated note bundles for AI sessions
 - [vault/_daily/](vault/_daily/), [vault/_weekly/](vault/_weekly/) — periodic notes
 
@@ -62,11 +74,33 @@ ML-iteration skills (defect-detection training loop):
 - `/train-coach` — Builds training configs (loss, augmentations, schedule) for a given task.
 - `/review-run <runs/expN>` — Manual entry point to spawn the `model-reviewer` subagent.
 
-Subagent in [.claude/agents/](.claude/agents/):
-- **model-reviewer** — read-only post-training auditor. Reads `runs/expN/results.csv`, confusion matrix, per-class AP, picks 20 worst val examples and gives 3-5 actionable changes for next run.
+Utility skills:
+- `/brief` — Plain-language recap of current context (≤3 paragraphs, no jargon).
+
+Multi-agent dev workflow (added 2026-05-24):
+- `/feature-flow <description>` — Orchestrated workflow: spec-writer → user approval → implementation → tester → code-reviewer → ui-reviewer (if frontend) → security-reviewer (if security-relevant). Use for any non-trivial change.
+
+Subagents in [.claude/agents/](.claude/agents/):
+- **model-reviewer** — read-only post-training auditor (ML runs).
+- **spec-writer** — turns rough idea into structured TZ before implementation.
+- **code-reviewer** — read-only multi-aspect review of changed files. Sonnet.
+- **tester** — writes/runs tests, reports failures. Can edit test files only.
+- **ui-reviewer** — read-only UI/UX/accessibility review for webapp + mobile. Sonnet.
+- **security-reviewer** — read-only security review for auth/payment/input/secrets changes. Opus.
 
 Hook in [.claude/settings.json](.claude/settings.json):
 - After any `Bash` invocation matching `train_yolo|train_defect_yolo|yolo train`, prints a hint to invoke the model-reviewer on the freshest `runs/` folder. Auto-discoverable, not auto-spawning.
+
+Agent Teams (experimental) enabled via `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` in [.claude/settings.json](.claude/settings.json) — allows spawning teams of subagents that communicate directly (mailbox + shared task list). Use sparingly: each teammate = full Claude instance = full context cost.
+
+## MCP servers
+
+- **Base44 MCP** — configured in [.mcp.json](.mcp.json), auto-approved via `enableAllProjectMcpServers`. OAuth-authenticated at first use. Tools: `list_user_apps`, `list_entity_schemas`, `query_entities`, `create_base44_app`, `edit_base44_app`. Use for querying CardChecker Plus user state, entity records, verifying deploys.
+- **Stripe MCP** — NOT in project repo (secret). User adds to `~/.claude.json` via `claude mcp add stripe --scope user -- npx -y @stripe/mcp --tools=all --api-key=KEY`. Use restricted key from Stripe Dashboard, not `sk_live_`. After connection: query subscription state, customer records, invoices, proration directly instead of asking for screenshots.
+
+## Cross-repo work (webapp at sibling path)
+
+Real product webapp is at `D:\amotrychenko\Desktop\CardChecker_MVP\` (separate repo, ~10 users). When working on webapp from this session, `permissions.additionalDirectories` in `.claude/settings.json` already includes that path. **But subagents may need session restart to pick up the broader scope** — if you get permission errors mid-session, either restart or inline file contents in subagent prompts as fallback. NOTE: `mobile/` directory in THIS repo is abandoned AI-generated prototype, not part of active product. Skip it for planning.
 
 ## Code structure (parallel to vault)
 
@@ -130,9 +164,10 @@ cd mobile && npx expo start
 
 Cloud-first (RunPod / Vast.ai / Lambda). Local laptop has RTX 4060 mobile (8 GB) — use for sanity-runs only (≤2 epochs on a 500-img subset). Full training and DINOv2 SSL pretrain go on rented H100/A100/RTX 4090. Budget envelope: ~$50 per full YOLOv8m run, ~$30-60 per DINOv2 pretrain.
 
-## Current Priorities
+## Current Priorities (re-ranked 2026-05-24)
 
-1. **Defect detection ML pipeline** — train on TAG dataset (~23k labelled, ~33k unlabelled scans). See [vault/10-Projects/2026-Q2-opencv-defects.md](vault/10-Projects/2026-Q2-opencv-defects.md).
-2. Mobile: real auth + cloud sync → [vault/10-Projects/2026-Q2-mobile-auth-and-cloud.md](vault/10-Projects/2026-Q2-mobile-auth-and-cloud.md)
-3. Recognition: improve JP/TW OCR accuracy → [vault/10-Projects/2026-Q2-jp-tw-ocr-accuracy.md](vault/10-Projects/2026-Q2-jp-tw-ocr-accuracy.md)
-4. Pricing: live price updates instead of daily snapshots → [vault/10-Projects/2026-Q2-live-pricing.md](vault/10-Projects/2026-Q2-live-pricing.md)
+1. **Mobile auth + cloud sync** — promoted from #2; tech debt block (mock auth, no sync, data loss on reinstall). See [vault/10-Projects/2026-Q2-mobile-auth-and-cloud.md](vault/10-Projects/2026-Q2-mobile-auth-and-cloud.md). Open decision: Firebase / Supabase / own.
+2. **Defect detection ML pipeline** — train on TAG dataset (~23k labelled, ~33k unlabelled scans). See [vault/10-Projects/2026-Q2-opencv-defects.md](vault/10-Projects/2026-Q2-opencv-defects.md). Parallel: consider Gemini model upgrade as interim — [vault/20-Areas/02-grading/gemini-model-upgrade.md](vault/20-Areas/02-grading/gemini-model-upgrade.md).
+3. **Recognition: JP/TW OCR accuracy** → [vault/10-Projects/2026-Q2-jp-tw-ocr-accuracy.md](vault/10-Projects/2026-Q2-jp-tw-ocr-accuracy.md)
+4. **Pricing: live price updates** → [vault/10-Projects/2026-Q2-live-pricing.md](vault/10-Projects/2026-Q2-live-pricing.md)
+5. **🆕 Smart manual search** (number / name / combo, smart catalog lookup) → [vault/10-Projects/2026-Q2-manual-search.md](vault/10-Projects/2026-Q2-manual-search.md)

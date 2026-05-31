@@ -26,11 +26,13 @@ Production inference: [[../06-api/modules/yolo_card_detector]] (ONNX, CPU).
 
 Production currently uses pretrained CLIP. Fine-tuned weights pending validation.
 
-## Defect YOLO (in-progress)
+## Defect Detection (ambitious plan)
 
-- [[defect-yolo/training]] — YOLOv11m на TAG dataset (23K images, 7 defect classes)
+**Live plan**: [[../02-grading/defect-detection/architecture]] — photometric stereo overlays as input channel, OBB-oriented bounding boxes, 12 classes, multi-angle capture, defect masks. Server-side GPU.
 
-Active milestone в [[../../10-Projects/2026-Q2-opencv-defects]].
+~~`defect-yolo/training`~~ → archived 2026-05-24 as pragmatic downgrade rejected by stakeholder. See [[../../40-Archive/superseded-plans/2026-05-23-defect-yolo-training-pragmatic]].
+
+Active milestone: [[../../10-Projects/2026-Q2-opencv-defects]].
 
 ## Embedding Index (production)
 

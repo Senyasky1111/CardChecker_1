@@ -2,17 +2,21 @@
 type: project
 status: in-progress
 created: 2026-05-21
-updated: 2026-05-21
-priority: 1
+updated: 2026-05-24
+priority: 2
 target: 2026-Q2
 area: [grading, ml]
 tags: [defect-detection, opencv, q2]
-related: [[../20-Areas/02-grading/defect-detection/architecture]]
+related: [[../20-Areas/02-grading/defect-detection/architecture]], [[../20-Areas/02-grading/gemini-model-upgrade]]
 ---
 
 # Project: OpenCV Defect Detection Layer
 
-> **Priority #1**. Дополнить Gemini grading быстрым OpenCV-слоем для defect detection.
+> **Priority #2** (demoted 2026-05-24 — Mobile Auth promoted to #1 as tech debt). Дополнить Gemini grading быстрым OpenCV-слоем для defect detection.
+
+## Interim improvement (parallel track)
+
+Пока YOLO defect detector не готов (Phases 3-4 ниже), рассмотреть **upgrade Gemini Flash → stronger model** для grading endpoint. См. [[../20-Areas/02-grading/gemini-model-upgrade]] — options + tradeoffs.
 
 ## Goal
 

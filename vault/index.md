@@ -108,7 +108,8 @@ Photo → Detection (YOLO-pose) → Warp → OCR (Tesseract/EasyOCR/doctr)
 - [[20-Areas/09-ml-research/_MOC]]
 - YOLO card detection: [[20-Areas/09-ml-research/yolo-card-detection/training]], [[20-Areas/09-ml-research/yolo-card-detection/dataset]]
 - CLIP fine-tuning: [[20-Areas/09-ml-research/clip-finetuning/strategy]], [[20-Areas/09-ml-research/clip-finetuning/pairs-generation]]
-- Defect YOLO: [[20-Areas/09-ml-research/defect-yolo/training]]
+- Defect detection plan: [[20-Areas/02-grading/defect-detection/architecture]] (live, ambitious)
+- ~~Defect YOLO pragmatic plan~~ → archived 2026-05-24: [[40-Archive/superseded-plans/2026-05-23-defect-yolo-training-pragmatic]]
 - Embedding index: [[20-Areas/09-ml-research/embedding-index/build-process]]
 - [[20-Areas/09-ml-research/experiments-log]] — append-only
 
