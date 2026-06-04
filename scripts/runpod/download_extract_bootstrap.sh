@@ -29,7 +29,9 @@ ls -lh /workspace/_v3_archive.tar.gz
 
 echo "=== [3/6] Extracting (3-5 min)... ==="
 mkdir -p /workspace/data
-tar -xzf /workspace/_v3_archive.tar.gz -C /workspace/data
+# --no-same-owner: ignore tarball's original UID/GID (Windows source) to avoid
+# 'Cannot change ownership' warnings + tar failing-exit-status under set -e.
+tar --no-same-owner -xzf /workspace/_v3_archive.tar.gz -C /workspace/data
 du -sh /workspace/data/tag_v3
 rm -f /workspace/_v3_archive.tar.gz
 
