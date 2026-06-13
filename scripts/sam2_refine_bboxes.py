@@ -172,10 +172,10 @@ def refine_card(
     metadata: dict, stats: Counter, hitl_samples: list,
 ) -> tuple[list[RefinedDefect], np.ndarray | None]:
     """Refine all bboxes in one (cert, side). Returns refined bboxes + image (for HITL)."""
-    # Load original metadata defects (have real (x, y) at TAG resolution)
-    src_defects = [d for d in metadata.get("surface_defects", []) if d.get("side") == side]
-    if not src_defects:
-        # Negative or no-defect card — pass through empty
+    # Label file is the source of truth on the pod (metadata may be empty if tag_raw
+    # wasn't uploaded). Read lines early and short-circuit on empty.
+    lines_pre = src_label.read_text().splitlines()
+    if not lines_pre:
         return [], None
 
     # Load image (post-resize, 1280px wide)
@@ -188,10 +188,8 @@ def refine_card(
     refined: list[RefinedDefect] = []
     rng = random.Random(42)
 
-    # Read original label lines (synthetic bboxes from build_v3_dataset.py)
-    lines = src_label.read_text().splitlines()
-    if not lines:
-        return [], None
+    # Reuse the early-read label lines (already validated non-empty).
+    lines = lines_pre
 
     import torch
     for line in lines:
