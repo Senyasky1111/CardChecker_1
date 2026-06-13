@@ -175,7 +175,21 @@ def main():
     print(dict(sorted(dist.items())))
 
     print(f"Loading backbone {args.backbone} (frozen)...")
-    backbone = torch.hub.load("facebookresearch/dinov2", args.backbone, source="github").to(device).eval()
+    # GitHub API rate-limits the fork-validation call (HTTP 403) on fresh containers.
+    # The zipball download itself is fine (codeload), so no-op the validation.
+    torch.hub._validate_not_a_forked_repo = lambda *a, **k: None
+    try:
+        backbone = torch.hub.load("facebookresearch/dinov2", args.backbone,
+                                  source="github", trust_repo=True).to(device).eval()
+    except Exception as e:
+        print(f"hub github load failed ({e}); trying local clone...")
+        import subprocess
+        clone = Path("/workspace/dinov2_repo")
+        if not clone.exists():
+            subprocess.run(["git", "clone", "--depth", "1",
+                            "https://github.com/facebookresearch/dinov2", str(clone)], check=True)
+        backbone = torch.hub.load(str(clone), args.backbone, source="local",
+                                  trust_repo=True).to(device).eval()
     model = GradeHead(backbone, feat_dim=1024).to(device)
 
     dl_tr = DataLoader(GradeDataset(train_items, args.data, "train", True),
