@@ -9,12 +9,15 @@ Usage on pod:
 """
 from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
-import os
+import os, sys
 
 SRC = Path("/workspace/data/tag_v3/detection")
-SAM2 = Path("/workspace/data/tag_v3/detection_sam2")
+# SAM2 output dir can be passed as argv[1]; default to detection_sam2
+SAM2 = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("/workspace/data/tag_v3/detection_sam2")
 OUT = Path("/workspace/sam2_check")
 OUT.mkdir(parents=True, exist_ok=True)
+# Only visualize cards containing center-surface defect classes (2=surface,3=scratch,4=crease,5=dent)
+PREFER_CLASSES = {2, 3, 4, 5}
 
 CLASSES = ["corner_wear","edge_wear","surface_damage","scratch","crease","dent","stain"]
 COLORS = [(230,40,40),(40,200,40),(60,130,230),(255,170,30),(180,80,200),(60,200,200),(220,200,40)]
@@ -51,6 +54,10 @@ for sam2_lbl in sorted((SAM2/"labels").rglob("*.txt")):
         continue
     sam2_lines = [l for l in sam2_lbl.read_text().splitlines() if l.strip()]
     if not sam2_lines:
+        continue
+    # Only keep cards that contain a center-surface defect class
+    classes_here = {int(l.split()[0]) for l in sam2_lines if l.split()}
+    if not (classes_here & PREFER_CLASSES):
         continue
     src_lines = [l for l in src_lbl.read_text().splitlines() if l.strip()]
     img = Image.open(img_path).convert("RGB")
