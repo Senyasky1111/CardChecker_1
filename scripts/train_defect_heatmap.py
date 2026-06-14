@@ -149,7 +149,7 @@ def extract_peaks(hm, thr=0.2, k=3):
         pts.append((c,y,x,float(hm[c,y,x])))
     return pts
 
-def eval_pointF1(model, loader, device, tol_hm=6):
+def eval_pointF1(model, loader, device, tol_hm=6, min_n=20):
     """Per-class point-F1: tile has 1 GT point; check if a peak of that class lands within tol."""
     model.eval()
     tp=Counter(); fp=Counter(); fn=Counter()
@@ -180,7 +180,7 @@ def eval_pointF1(model, loader, device, tol_hm=6):
         p=tp[c]/max(tp[c]+fp[c],1); r=tp[c]/max(tp[c]+fn[c],1)
         f1=2*p*r/max(p+r,1e-9)
         res[CLASSES[c]]={"p":round(p,3),"r":round(r,3),"f1":round(f1,3),"n":tp[c]+fn[c]}
-        if tp[c]+fn[c]>=20: f1s.append(f1)
+        if tp[c]+fn[c]>=min_n: f1s.append(f1)
     res["macro_f1"]=round(float(np.mean(f1s)),4) if f1s else 0.0
     return res
 
@@ -196,7 +196,8 @@ def main():
     ap.add_argument("--batch",type=int,default=48)
     ap.add_argument("--lr",type=float,default=2e-3)
     ap.add_argument("--out",type=Path,default=Path("/workspace/runs/defect_hm"))
-    ap.add_argument("--sample",type=int,default=None,help="overfit-sanity on N tiles")
+    ap.add_argument("--sample",type=int,default=None,help="train on N tiles")
+    ap.add_argument("--overfit",action="store_true",help="eval on the SAME train tiles (sanity: should hit F1~1.0)")
     args=ap.parse_args()
     args.out.mkdir(parents=True,exist_ok=True)
     device="cuda"
@@ -204,8 +205,15 @@ def main():
     tr=TileDataset(args.data,"train",train=True)
     va=TileDataset(args.data,"val",train=False)
     if args.sample:
-        tr.items=tr.items[:args.sample]; va.items=va.items[:max(50,args.sample//4)]
-    print(f"train tiles={len(tr)} val tiles={len(va)}")
+        tr.items=tr.items[:args.sample]
+        if args.overfit:
+            # true overfit sanity: eval on the SAME tiles (no augmentation) — proves the
+            # model CAN memorize + the eval/peak pipeline works end-to-end
+            va=TileDataset(args.data,"train",train=False)
+            va.items=list(tr.items)
+        else:
+            va.items=va.items[:max(50,args.sample//4)]
+    print(f"train tiles={len(tr)} val tiles={len(va)} overfit={args.overfit}")
 
     # effective-number class weights (beta=0.9999) from train class counts
     cc=Counter(c for _,c,_,_ in tr.items)
@@ -233,7 +241,7 @@ def main():
                 logit=model(x); loss=neg_loss(logit,hm,cls_w)
             opt.zero_grad(); loss.backward(); opt.step(); sched.step()
             tot+=loss.item(); nb+=1
-        res=eval_pointF1(model,dl_va,device)
+        res=eval_pointF1(model,dl_va,device,min_n=1 if args.overfit else 20)
         row={"epoch":ep,"loss":round(tot/max(nb,1),4),"macro_f1":res["macro_f1"],"sec":round(time.time()-t0)}
         log.append({**row,"per_class":res})
         print(f"ep{ep:02d} loss={row['loss']:.4f} val_macroF1={res['macro_f1']:.3f} "
