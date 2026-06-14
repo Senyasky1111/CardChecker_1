@@ -38,5 +38,20 @@ python3 -c "import torch;x=torch.zeros(2,2).cuda();print('GPU OK',x.device)"
 echo "=== [6/6] 50-tile OVERFIT SANITY (should reach high macro-F1 fast) ==="
 cd /workspace/CardChecker
 python3 scripts/train_defect_heatmap.py --data /workspace/data/tag_v3_tiles \
-  --sample 50 --epochs 15 --batch 16 --out /workspace/runs/sanity 2>&1 | tail -25
-echo "=== SANITY DONE — check macro_f1 trend above ==="
+  --sample 50 --epochs 15 --batch 16 --out /workspace/runs/sanity 2>&1 | tee /workspace/sanity.log | tail -25
+echo "=== SANITY DONE ==="
+
+# Upload results back to HF so the orchestrator can read them without SSH
+python3 - <<'PY'
+import os
+from huggingface_hub import HfApi, login
+login(token=os.environ['HF_TOKEN'])
+api=HfApi()
+for f in ['/workspace/sanity.log','/workspace/runs/sanity/log.json']:
+    if os.path.exists(f):
+        api.upload_file(path_or_fileobj=f, path_in_repo=f'results/{os.path.basename(f)}',
+            repo_id='Senyasky1111/cardchecker-v3-staging', repo_type='dataset',
+            commit_message='sanity result')
+        print('uploaded', f, flush=True)
+PY
+echo "=== RESULTS UPLOADED TO HF ==="
