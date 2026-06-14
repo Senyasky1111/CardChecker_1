@@ -18,7 +18,7 @@ Usage on pod:
     --data /workspace/data/tag_v3_tiles --epochs 40 --out /workspace/runs/defect_hm
 """
 from __future__ import annotations
-import argparse, json, math, time
+import argparse, json, os, time
 from pathlib import Path
 from collections import Counter
 
@@ -96,9 +96,11 @@ class HeatmapNet(nn.Module):
     def __init__(self, backbone="hrnet_w32", stride=4):
         super().__init__()
         import timm
-        # features_only gives multi-scale; HRNet highest-res is stride 4
+        # features_only gives multi-scale. HRNet: feats[0]=stride2(64ch), feats[1]=stride4(128ch).
+        # We want stride-4 (matches tile//stride=128 heatmap).
         self.backbone = timm.create_model(backbone, features_only=True, pretrained=True)
-        ch = self.backbone.feature_info.channels()[0]  # stride-4 channels
+        self.feat_idx = 1  # stride-4
+        ch = self.backbone.feature_info.channels()[self.feat_idx]
         self.head = nn.Sequential(
             nn.Conv2d(ch, 128, 3, padding=1), nn.BatchNorm2d(128), nn.ReLU(inplace=True),
             nn.Conv2d(128, NC, 1),
@@ -107,8 +109,8 @@ class HeatmapNet(nn.Module):
         self.head[-1].bias.data.fill_(-4.6)
 
     def forward(self, x):
-        feats = self.backbone(x)          # list; [0] = stride-4
-        h = self.head(feats[0])
+        feats = self.backbone(x)          # list of multi-scale features
+        h = self.head(feats[self.feat_idx])  # stride-4
         return h                          # logits (NC, H/4, W/4)
 
 # ---------------------------------------------------------------------------
@@ -116,14 +118,16 @@ class HeatmapNet(nn.Module):
 # ---------------------------------------------------------------------------
 
 def neg_loss(pred_logits, gt, cls_w):
-    """CenterNet penalty-reduced focal on a sigmoid heatmap."""
-    pred = torch.sigmoid(pred_logits).clamp(1e-4, 1-1e-4)
-    pos = gt.eq(1).float()
-    neg = gt.lt(1).float()
+    """CenterNet penalty-reduced focal. float32 + logsigmoid for bf16 numerical safety."""
+    pred_logits = pred_logits.float()          # demote out of bf16 (sigmoid saturates to 1.0)
+    log_p = F.logsigmoid(pred_logits)          # stable log(sigmoid)
+    log_1mp = F.logsigmoid(-pred_logits)       # stable log(1-sigmoid)
+    pred = torch.sigmoid(pred_logits).clamp(1e-6, 1-1e-6)
+    pos = gt.ge(0.95).float()                  # peak is sub-pixel <1.0 for 2/3 of tiles; >=0.95 = positive
+    neg = (1 - pos)
     neg_weights = torch.pow(1-gt, 4)
-    pos_loss = torch.log(pred)*torch.pow(1-pred,2)*pos
-    neg_loss_ = torch.log(1-pred)*torch.pow(pred,2)*neg_weights*neg
-    # per-class weighting
+    pos_loss = log_p*torch.pow(1-pred,2)*pos
+    neg_loss_ = log_1mp*torch.pow(pred,2)*neg_weights*neg
     w = cls_w.view(1,NC,1,1)
     pos_loss = (pos_loss*w).sum()
     neg_loss_ = (neg_loss_*w).sum()
@@ -161,15 +165,15 @@ def eval_pointF1(model, loader, device, tol_hm=6):
                 gch=hm_gt[b,c]
                 gy,gx=(gch==gch.max()).nonzero()[0].tolist() if gch.max()>0 else (None,None)
                 peaks=extract_peaks(hm[b])
-                # did we hit class c within tol?
-                hit=False
-                for pc,py,px,sc in peaks:
-                    if pc==c and gy is not None and abs(py-gy)<=tol_hm and abs(px-gx)<=tol_hm:
-                        hit=True
-                    elif pc==c:
-                        fp[pc]+=1  # predicted c somewhere else (no GT there in this single-defect tile)
-                if hit: tp[c]+=1
-                else: fn[c]+=1
+                # did any class-c peak hit the GT within tolerance?
+                hit = any(pc==c and gy is not None and abs(py-gy)<=tol_hm and abs(px-gx)<=tol_hm
+                          for pc,py,px,sc in peaks)
+                if hit:
+                    tp[c]+=1
+                else:
+                    fn[c]+=1
+                    # class-c peaks that fired with no GT match = false positives
+                    fp[c]+=sum(1 for pc,_,_,_ in peaks if pc==c)
     res={}
     f1s=[]
     for c in range(NC):
@@ -213,8 +217,8 @@ def main():
     print("class weights:",[round(float(x),2) for x in w])
 
     model=HeatmapNet(args.backbone).to(device)
-    dl_tr=DataLoader(tr,batch_size=args.batch,shuffle=True,num_workers=8,pin_memory=True,drop_last=True)
-    dl_va=DataLoader(va,batch_size=args.batch,shuffle=False,num_workers=8,pin_memory=True)
+    dl_tr=DataLoader(tr,batch_size=args.batch,shuffle=True,num_workers=min(8, os.cpu_count() or 4),pin_memory=True,drop_last=True)
+    dl_va=DataLoader(va,batch_size=args.batch,shuffle=False,num_workers=min(8, os.cpu_count() or 4),pin_memory=True)
 
     opt=torch.optim.AdamW(model.parameters(),lr=args.lr,weight_decay=1e-4)
     sched=torch.optim.lr_scheduler.OneCycleLR(opt,max_lr=args.lr,
