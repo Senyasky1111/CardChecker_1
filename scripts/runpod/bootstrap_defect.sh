@@ -41,7 +41,7 @@ python3 scripts/train_defect_heatmap.py --data /workspace/data/tag_v3_tiles \
   --sample 50 --epochs 15 --batch 16 --out /workspace/runs/sanity 2>&1 | tee /workspace/sanity.log | tail -25
 echo "=== SANITY DONE ==="
 
-# Upload results back to HF so the orchestrator can read them without SSH
+# Upload sanity results to HF
 python3 - <<'PY'
 import os
 from huggingface_hub import HfApi, login
@@ -50,8 +50,35 @@ api=HfApi()
 for f in ['/workspace/sanity.log','/workspace/runs/sanity/log.json']:
     if os.path.exists(f):
         api.upload_file(path_or_fileobj=f, path_in_repo=f'results/{os.path.basename(f)}',
-            repo_id='Senyasky1111/cardchecker-v3-staging', repo_type='dataset',
-            commit_message='sanity result')
+            repo_id='Senyasky1111/cardchecker-v3-staging', repo_type='dataset', commit_message='sanity result')
         print('uploaded', f, flush=True)
 PY
-echo "=== RESULTS UPLOADED TO HF ==="
+echo "=== SANITY RESULTS ON HF ==="
+
+# Gate full training on sanity passing (overfit should reach high macro-F1)
+SANITY_F1=$(python3 -c "import json; d=json.load(open('/workspace/runs/sanity/log.json')); print(max(r['macro_f1'] for r in d))" 2>/dev/null || echo 0)
+echo "=== sanity best macro_f1 = $SANITY_F1 ==="
+
+if python3 -c "import sys; sys.exit(0 if float('$SANITY_F1')>0.5 else 1)"; then
+  echo "=== SANITY PASSED -> FULL TRAINING ==="
+  python3 scripts/train_defect_heatmap.py --data /workspace/data/tag_v3_tiles \
+    --epochs 40 --batch 48 --out /workspace/runs/defect_full 2>&1 | tee /workspace/full.log | tail -40
+  python3 - <<'PY'
+import os
+from huggingface_hub import HfApi, login
+login(token=os.environ['HF_TOKEN']); api=HfApi()
+for f in ['/workspace/full.log','/workspace/runs/defect_full/log.json','/workspace/runs/defect_full/best.pt']:
+    if os.path.exists(f):
+        api.upload_file(path_or_fileobj=f, path_in_repo=f'results/{os.path.basename(f)}',
+            repo_id='Senyasky1111/cardchecker-v3-staging', repo_type='dataset', commit_message='full train result')
+        print('uploaded', f, flush=True)
+PY
+  echo "=== FULL TRAIN RESULTS ON HF ==="
+else
+  echo "=== SANITY FAILED (macro_f1<=0.5) — NOT running full train ==="
+fi
+
+# Self-stop to avoid idle cost (pod has RUNPOD_POD_ID in env)
+echo "=== stopping pod to stop billing ==="
+sleep 10
+runpodctl stop pod "${RUNPOD_POD_ID:-}" 2>/dev/null || true
