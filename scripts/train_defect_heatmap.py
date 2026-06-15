@@ -93,12 +93,12 @@ class TileDataset(Dataset):
 # ---------------------------------------------------------------------------
 
 class HeatmapNet(nn.Module):
-    def __init__(self, backbone="hrnet_w32", stride=4):
+    def __init__(self, backbone="hrnet_w32", stride=4, pretrained=True):
         super().__init__()
         import timm
         # features_only gives multi-scale. HRNet: feats[0]=stride2(64ch), feats[1]=stride4(128ch).
         # We want stride-4 (matches tile//stride=128 heatmap).
-        self.backbone = timm.create_model(backbone, features_only=True, pretrained=True)
+        self.backbone = timm.create_model(backbone, features_only=True, pretrained=pretrained)
         self.feat_idx = 1  # stride-4
         ch = self.backbone.feature_info.channels()[self.feat_idx]
         self.head = nn.Sequential(
