@@ -168,12 +168,15 @@ def eval_pointF1(model, loader, device, tol_hm=6, min_n=20):
                 # did any class-c peak hit the GT within tolerance?
                 hit = any(pc==c and gy is not None and abs(py-gy)<=tol_hm and abs(px-gx)<=tol_hm
                           for pc,py,px,sc in peaks)
+                n_c = sum(1 for pc,_,_,_ in peaks if pc==c)
                 if hit:
                     tp[c]+=1
                 else:
                     fn[c]+=1
-                    # class-c peaks that fired with no GT match = false positives
-                    fp[c]+=sum(1 for pc,_,_,_ in peaks if pc==c)
+                # every class-c peak beyond the one that matched the GT is a false positive
+                # (counted on HIT tiles too — the old code only counted FP on misses, which
+                #  hid the full-card flood; see EXP-0 harness for the real metric)
+                fp[c]+=max(0, n_c-(1 if hit else 0))
     res={}
     f1s=[]
     for c in range(NC):
