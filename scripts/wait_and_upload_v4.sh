@@ -5,13 +5,23 @@ set -u
 cd /d/CardChecker
 HF=$(grep HF_TOKEN .env | cut -d= -f2 | tr -d '\r')
 
-echo "[wait] waiting for build_exp1_tiles to finish..."
-while ps -W 2>/dev/null | grep -q "build_exp1_tiles"; do
-  sleep 60
+echo "[wait] waiting for v4 tile count to stabilize (build done)..."
+prev=-1; stable=0
+while true; do
+  sleep 90
+  cur=$(ls data/tag_v4_tiles/images/*/ 2>/dev/null | grep -c jpg)
+  neg=$(find data/tag_v4_tiles/labels -name "*_n*.txt" 2>/dev/null | wc -l)
+  if [ "$cur" -eq "$prev" ]; then stable=$((stable+1)); else stable=0; fi
+  echo "[wait] tiles=$cur negatives=$neg stable=$stable"
+  prev=$cur
+  # done when count unchanged for ~7.5 min AND negatives pass ran
+  if [ "$stable" -ge 5 ] && [ "$neg" -ge 1000 ]; then break; fi
+  # safety: count flat for 20 min even w/o negatives -> stop waiting (build likely died)
+  if [ "$stable" -ge 13 ]; then echo "[wait] count flat 20min"; break; fi
 done
 NEG=$(find data/tag_v4_tiles/labels -name "*_n*.txt" 2>/dev/null | wc -l)
 TILES=$(ls data/tag_v4_tiles/images/*/ 2>/dev/null | grep -c jpg)
-echo "[wait] build process gone. tiles=$TILES negatives=$NEG"
+echo "[wait] done waiting. tiles=$TILES negatives=$NEG"
 if [ "$NEG" -lt 1000 ]; then
   echo "[ABORT] too few negatives ($NEG) — build likely incomplete/crashed. Not uploading."
   exit 1
