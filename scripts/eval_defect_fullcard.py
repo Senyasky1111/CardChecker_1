@@ -33,8 +33,9 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 sys.path.insert(0, str(Path(__file__).parent))
-from train_defect_heatmap import HeatmapNet, NC  # noqa
+import train_defect_heatmap as v3m  # noqa
 
+NC = 7  # set in main() depending on --exp1
 ROOT = Path("d:/CardChecker")
 RAW = ROOT / "data/tag_raw"
 V3 = ROOT / "data/tag_v3/detection"   # split assignment
@@ -48,15 +49,20 @@ _NORM = T.Compose([T.ToTensor(),
 THRS = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
 
 
-def load_model():
+def load_model(ckpt_path, exp1):
     import pathlib
     _p = pathlib.PosixPath
     pathlib.PosixPath = pathlib.WindowsPath
     try:
-        ckpt = torch.load(CKPT, map_location="cpu", weights_only=False)
+        ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
     finally:
         pathlib.PosixPath = _p
-    m = HeatmapNet(ckpt.get("args", {}).get("backbone", "hrnet_w32"), pretrained=False)
+    bb = ckpt.get("args", {}).get("backbone", "hrnet_w32")
+    if exp1:
+        import train_defect_exp1 as e1
+        m = e1.HeatmapNet(bb, pretrained=False)
+    else:
+        m = v3m.HeatmapNet(bb, pretrained=False)
     m.load_state_dict(ckpt["model"]); m.eval()
     return m
 
@@ -190,9 +196,13 @@ def main():
     ap.add_argument("--min-pts", type=int, default=8)
     ap.add_argument("--match-r", type=int, default=6, help="match radius in acc-px (=4x card px); 6=24px")
     ap.add_argument("--nms-k", type=int, default=7)
+    ap.add_argument("--ckpt", default=str(CKPT))
+    ap.add_argument("--exp1", action="store_true", help="load single-channel EXP-1 model")
     args = ap.parse_args()
+    global NC
+    NC = 1 if args.exp1 else 7
     OUT.mkdir(parents=True, exist_ok=True)
-    model = load_model()
+    model = load_model(args.ckpt, args.exp1)
     sm = split_map()
     print(f"split: {sum(v=='train' for v in sm.values())} train / "
           f"{sum(v=='val' for v in sm.values())} val / {sum(v=='test' for v in sm.values())} test")
