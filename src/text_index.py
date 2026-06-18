@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import re
 from collections import defaultdict
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
@@ -37,6 +38,81 @@ def normalize_name(name: str) -> str:
     name = _PARENS_RE.sub("", name)
     name = _STRIP_RE.sub("", name)
     return name.lower().strip()
+
+
+# A query token that is a collector number: "96", "096", "096/080", "96/80".
+_NUM_TOKEN_RE = re.compile(r"^(\d{1,4})(?:/(\d{1,5}))?$")
+# A short alphabetic token that *might* be a printed set code: "SVE", "SSP".
+_SETCODE_RE = re.compile(r"^[A-Za-z]{2,4}$")
+
+
+@dataclass
+class SearchQuery:
+    """Parsed free-text search query.
+
+    `set_code` and `name` are deliberately non-exclusive: a leading short
+    token like "Mew" or "SVE" is exposed BOTH as a candidate set code and as
+    part of `name`, because the two cases ("Mew 25" = name+number vs
+    "SVE 096" = setcode+number) are indistinguishable without the catalog.
+    The endpoint resolves the ambiguity by trying both against SQL.
+    """
+
+    raw: str
+    number: Optional[int] = None
+    total: Optional[int] = None
+    set_code: Optional[str] = None
+    name: str = ""
+    mode: str = "name"  # "number" | "name" | "combo"
+
+
+def parse_search_query(q: str) -> SearchQuery:
+    """Classify a free-text query into number / name / combo signals.
+
+    Examples:
+        "096/080"              -> number=96, total=80, mode=number
+        "25"                   -> number=25, mode=number (ambiguous; caller returns top-N)
+        "Pikachu"              -> name="Pikachu", mode=name
+        "Pikachu 25"           -> name="Pikachu", number=25, mode=combo
+        "Charizard ex 199/197" -> name="Charizard ex", number=199, total=197, mode=combo
+        "SVE 096"              -> set_code="SVE", name="SVE", number=96, mode=combo
+    """
+    raw = (q or "").strip()
+    tokens = raw.split()
+
+    number: Optional[int] = None
+    total: Optional[int] = None
+    number_idx: Optional[int] = None
+
+    # First token that looks like a collector number wins.
+    for i, tok in enumerate(tokens):
+        m = _NUM_TOKEN_RE.match(tok)
+        if m:
+            n = int(m.group(1))
+            if 1 <= n <= 9999:
+                number = n
+                total = int(m.group(2)) if m.group(2) else None
+                number_idx = i
+                break
+
+    # A leading 2-4 letter token (not itself the number) may be a set code.
+    set_code: Optional[str] = None
+    if number is not None and tokens and number_idx != 0 and _SETCODE_RE.match(tokens[0]):
+        set_code = tokens[0].upper()
+
+    # Name keeps every non-number token (including a candidate set-code token,
+    # so "Mew 25" can still match the Pokémon "Mew").
+    name = " ".join(t for i, t in enumerate(tokens) if i != number_idx).strip()
+
+    if number is not None and name:
+        mode = "combo"
+    elif number is not None:
+        mode = "number"
+    else:
+        mode = "name"
+
+    return SearchQuery(
+        raw=raw, number=number, total=total, set_code=set_code, name=name, mode=mode
+    )
 
 
 class CardTextIndex:

@@ -18,7 +18,7 @@ from typing import Optional
 
 import numpy as np
 from PIL import Image
-from rapidfuzz import fuzz
+from rapidfuzz import fuzz, process
 
 from src.card_detector import get_detector
 from src.db import get_connection
@@ -469,6 +469,48 @@ class CardMatcher:
             LIMIT ?""",
             like_params + [limit],
         ).fetchall()
+        return [_row_to_dict(r) for r in rows]
+
+    def _query_by_name_fuzzy(
+        self, name: str, limit: int = 20, lang: str | None = None, threshold: int = 80
+    ) -> list[dict]:
+        """Typo-tolerant name search (rapidfuzz) for when exact + LIKE miss.
+
+        Scans distinct normalized names once (cached) and keeps those within
+        `threshold` similarity, then fetches their cards. Used as a fallback
+        so a query like 'pikchu' still finds 'Pikachu'.
+        """
+        normalized = _normalize_name(name)
+        if not normalized:
+            return []
+
+        if not hasattr(self, "_distinct_name_cache"):
+            rows = self.conn.execute(
+                "SELECT DISTINCT name_normalized FROM cards "
+                "WHERE name_normalized IS NOT NULL AND name_normalized != ''"
+            ).fetchall()
+            self._distinct_name_cache = [r[0] for r in rows]
+
+        matches = process.extract(
+            normalized,
+            self._distinct_name_cache,
+            scorer=fuzz.ratio,
+            limit=10,
+            score_cutoff=threshold,
+        )
+        if not matches:
+            return []
+
+        matched_names = [mt[0] for mt in matches]
+        placeholders = ",".join("?" * len(matched_names))
+        sql = _SELECT_SQL + f" WHERE c.name_normalized IN ({placeholders})"
+        params: list = list(matched_names)
+        if lang:
+            sql += " AND c.language = ?"
+            params.append(lang)
+        sql += " ORDER BY p.trend DESC NULLS LAST LIMIT ?"
+        params.append(limit)
+        rows = self.conn.execute(sql, params).fetchall()
         return [_row_to_dict(r) for r in rows]
 
     # ------------------------------------------------------------------

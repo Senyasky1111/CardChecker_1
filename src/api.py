@@ -36,7 +36,8 @@ from PIL import Image
 from pydantic import BaseModel
 
 from src.card_detector import get_detector, visualize_detection
-from src.card_matcher import CardMatcher, MatchResult
+from src.card_matcher import CardMatcher, MatchResult, _normalize_name as _normalize_card_name
+from src.text_index import parse_search_query
 from src.cardmarket_url import card_url
 from src.ebay_url import ebay_sold_url
 from src.ocr import CardOCR
@@ -213,6 +214,22 @@ class IdentifyV2Response(BaseModel):
     confidence: float = 0.0
     top_match: Optional[SQLCardMatch] = None
     alternatives: list[SQLCardMatch] = []
+
+
+class QueryInterpretation(BaseModel):
+    """How /search understood the raw query — lets the UI show 'matched by ...'."""
+    mode: str = "name"  # "number" | "name" | "combo"
+    parsed_number: Optional[int] = None
+    parsed_total: Optional[int] = None
+    parsed_set_code: Optional[str] = None
+    parsed_name: str = ""
+    result_count: int = 0
+
+
+class SearchResponse(BaseModel):
+    """Response from /search — ranked candidates in the same shape as identify-v2."""
+    results: list[SQLCardMatch] = []
+    query_interpretation: QueryInterpretation
 
 
 class HealthResponse(BaseModel):
@@ -650,6 +667,109 @@ async def identify_card_v2(
         confidence=result.confidence,
         top_match=top,
         alternatives=alts,
+    )
+
+
+@app.get("/search", response_model=SearchResponse)
+async def search_cards(
+    q: str = Query(..., min_length=1, description="Free text: number, name, or combo"),
+    lang: Optional[str] = Query(
+        default=None, description="Filter by language: en, ja, zh-tw"
+    ),
+    limit: int = Query(default=20, ge=1, le=50),
+    locale: str = Query(default="en", description="CardMarket locale for URLs"),
+):
+    """Smart manual card search by collector number, name, or combo.
+
+    Accepts one flexible query and tries SQL lookups from most specific to
+    broadest, deduping by card. Ambiguous number-only queries (e.g. "25")
+    return top-N candidates rather than asserting a single card. Results use
+    the same enriched shape as /identify-v2 so the frontend needs no new
+    render logic.
+    """
+    matcher = _get_matcher()
+    sq = parse_search_query(q)
+
+    ordered: list[dict] = []
+    seen: set = set()
+
+    def _add(rows: Optional[list[dict]]) -> None:
+        for r in rows or []:
+            if lang and r.get("language") != lang:
+                continue
+            # Stable dedup key — fall back to a composite when tcgdex_id is
+            # absent, so the same card from two strategies still collapses.
+            key = r.get("tcgdex_id") or (
+                r.get("cm_id_product"),
+                r.get("set_id"),
+                r.get("collector_number"),
+                r.get("language"),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            ordered.append(r)
+
+    number, total, name, set_code = sq.number, sq.total, sq.name, sq.set_code
+
+    # COMBO — the user typed a name, so the name is the selective signal and
+    # the number just refines it. Name-matching cards always outrank pure
+    # number matches (e.g. "Charizard 199/197" must surface Charizard first,
+    # not every card numbered 199).
+    deferred_name_rows: Optional[list[dict]] = None
+    if number is not None and name:
+        name_rows = matcher._query_by_name(name, limit=50, lang=lang)
+        if not name_rows and not set_code:
+            name_rows = matcher._query_by_name_fuzzy(name, limit=50, lang=lang)
+        # Does the token match a real card name exactly, or only loosely (LIKE)?
+        # An exact name ("Mew") beats a set-code guess; a loose one ("SVE",
+        # which only substring-matches "Sabrina's Venonat") should not.
+        norm = _normalize_card_name(name)
+        is_exact_name = any(r.get("name_normalized") == norm for r in name_rows)
+        # name + exact collector number (prefer an exact set-total match too)
+        num_match = [r for r in name_rows if r.get("collector_number") == number]
+        num_match.sort(
+            key=lambda r: 0 if (total is not None and r.get("set_total") == total) else 1
+        )
+        if is_exact_name or not set_code:
+            _add(num_match)
+            _add(name_rows)
+        else:
+            # Leading token looks more like a set code than a name — let the
+            # set-code path lead and keep loose name matches as a late fallback.
+            deferred_name_rows = name_rows
+
+    # NUMBER strategies — most specific first; also the only path when no name.
+    if number is not None and set_code:
+        rows = matcher._query_number_and_code(number, set_code, lang=lang)
+        if not rows:
+            rows = matcher._query_number_and_code(number, set_code)
+        _add(rows)
+    if number is not None and total is not None:
+        _add(matcher._query_number_and_total(number, total))
+    if number is not None:
+        _add(matcher._query_number_only(number, lang=lang))
+    if deferred_name_rows:
+        _add(deferred_name_rows)
+
+    # NAME only — exact/LIKE first, then typo-tolerant fuzzy fallback.
+    if name and number is None:
+        _add(matcher._query_by_name(name, limit=limit, lang=lang))
+        if not ordered:
+            _add(matcher._query_by_name_fuzzy(name, limit=limit, lang=lang))
+
+    results = [_match_to_card(c, locale) for c in ordered[:limit]]
+
+    return SearchResponse(
+        results=results,
+        query_interpretation=QueryInterpretation(
+            mode=sq.mode,
+            parsed_number=number,
+            parsed_total=total,
+            parsed_set_code=set_code,
+            parsed_name=name,
+            result_count=len(results),
+        ),
     )
 
 
