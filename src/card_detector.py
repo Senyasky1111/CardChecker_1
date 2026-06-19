@@ -162,17 +162,29 @@ def detect_outer_quad(img: np.ndarray) -> "np.ndarray | None":
         return None                      # foreground too small -> not a confident card
     if area > 0.985 * H * W:
         return None                      # card bleeds to frame edges -> use full frame instead
-    box = order_corners(cv2.boxPoints(cv2.minAreaRect(big)).astype(np.float32))  # clean rotated rect
+
+    # axis-aligned bbox — robust to mask noise (just min/max), introduces ZERO rotation
+    x, y, bw, bh = cv2.boundingRect(big)
+    bbox = order_corners(np.array([[x, y], [x + bw, y], [x + bw, y + bh], [x, y + bh]], np.float32))
+    fill = area / max(bw * bh, 1)        # ~1.0 if the card fills its bbox (i.e. axis-aligned)
+
+    box = order_corners(cv2.boxPoints(cv2.minAreaRect(big)).astype(np.float32))
+    edge = box[1] - box[0]
+    tilt = abs(np.degrees(np.arctan2(edge[1], edge[0])))
+    tilt = min(tilt, abs(90 - tilt))     # angle off the nearest axis
+
+    # 1) genuine PERSPECTIVE (trapezoid) -> use the true 4-point quad
     peri = cv2.arcLength(big, True)
     approx = cv2.approxPolyDP(big, 0.02 * peri, True)
     if len(approx) == 4:
         a = order_corners(approx.reshape(4, 2).astype(np.float32))
         diag = max(np.linalg.norm(box[0] - box[2]), 1.0)
-        disp = float(np.max(np.linalg.norm(a - box, axis=1)) / diag)
-        # use the true (possibly perspective) quad ONLY when it clearly departs from a rectangle;
-        # otherwise the rotated-rect avoids the skew that approxPolyDP's jagged corners introduce
-        # on already-flat cards (e.g. scans / TAG studio images).
-        return a if disp > 0.02 else box
+        if float(np.max(np.linalg.norm(a - box, axis=1)) / diag) > 0.03:
+            return a
+    # 2) already STRAIGHT (axis-aligned & fills bbox) -> plain crop, NO warp/rotation
+    if tilt < 1.5 and fill > 0.90:
+        return bbox
+    # 3) merely ROTATED -> correct the rotation with the tight rotated rect
     return box
 
 
