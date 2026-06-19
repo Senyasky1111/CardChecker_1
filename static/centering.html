@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no"/>
+<title>CardChecker — Centering</title>
+<style>
+  :root { --bg:#0f1115; --panel:#171a21; --line:#00e5ff; --ok:#34c759; --warn:#ff9f0a; --txt:#e8eaed; }
+  * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  body { margin:0; background:var(--bg); color:var(--txt); font:14px/1.4 system-ui,Segoe UI,Roboto,sans-serif; }
+  header { padding:12px 16px; font-weight:600; border-bottom:1px solid #222; display:flex; gap:12px; align-items:center; }
+  header .sub { font-weight:400; color:#9aa0a6; font-size:12px; }
+  .wrap { display:flex; flex-wrap:wrap; gap:16px; padding:16px; }
+  .stage { position:relative; background:var(--panel); border-radius:10px; padding:10px; }
+  canvas#card { touch-action:none; border-radius:6px; display:block; max-width:100%; }
+  .panel { flex:1; min-width:240px; background:var(--panel); border-radius:10px; padding:16px; }
+  .row { display:flex; justify-content:space-between; padding:8px 0; border-bottom:1px solid #23262e; }
+  .row b { font-size:20px; }
+  .big { font-size:34px; font-weight:700; margin:6px 0; }
+  .axis { color:#9aa0a6; font-size:12px; }
+  button, label.btn { background:#222732; color:var(--txt); border:1px solid #2c313c; border-radius:8px; padding:9px 14px; cursor:pointer; font-size:14px; }
+  button:hover, label.btn:hover { background:#2a3140; }
+  input[type=file]{ display:none; }
+  #loupe { position:fixed; width:140px; height:140px; border-radius:50%; border:2px solid #fff; box-shadow:0 4px 20px #000a; pointer-events:none; display:none; z-index:50; background:#000; }
+  .flag { font-size:12px; padding:3px 8px; border-radius:6px; }
+  .flag.lo { background:#3a2a00; color:var(--warn); } .flag.hi { background:#06351a; color:var(--ok); }
+  .hint { color:#9aa0a6; font-size:12px; margin-top:10px; }
+  .toggle { display:flex; gap:8px; align-items:center; margin-top:10px; font-size:13px; color:#9aa0a6; }
+</style>
+</head>
+<body>
+<header>
+  <span>CardChecker — Centering</span>
+  <span class="sub">rectify → drag the 4 inner border lines → exact L/R &amp; T/B</span>
+</header>
+
+<div class="wrap">
+  <div class="stage">
+    <canvas id="card" width="630" height="880"></canvas>
+  </div>
+  <div class="panel">
+    <label class="btn" for="file">📷 Choose / take photo</label>
+    <input id="file" type="file" accept="image/*" capture="environment"/>
+    <span id="status" class="hint"></span>
+
+    <div style="margin-top:16px">
+      <div class="axis">Left / Right</div>
+      <div class="row"><span>L–R</span><b id="lr">–</b></div>
+      <div class="axis" style="margin-top:8px">Top / Bottom</div>
+      <div class="row"><span>T–B</span><b id="tb">–</b></div>
+      <div class="axis" style="margin-top:12px">Centering (worst axis)</div>
+      <div class="big" id="grade">–</div>
+      <span id="flag" class="flag"></span>
+    </div>
+
+    <div class="toggle">
+      <input type="checkbox" id="frameToggle"/>
+      <label for="frameToggle">Measure to the white inner border (double-border cards)</label>
+    </div>
+    <div class="hint">Drag a line; a magnifier appears for precise placement. Pinch-zoom the card to fine-tune. The card edge = the canvas edge after rectification.</div>
+  </div>
+</div>
+
+<canvas id="loupe" width="140" height="140"></canvas>
+
+<script>
+const API = location.origin;           // serve this page from the FastAPI app
+const cv = document.getElementById('card'), ctx = cv.getContext('2d');
+const loupe = document.getElementById('loupe'), lctx = loupe.getContext('2d');
+let img = new Image(), canvas = null;  // canvas dims from server (rectified px)
+let lines = null;                      // {left,right,top,bottom} in canvas px
+let scale = 1, dragging = null;
+
+function fit() {                        // fit rectified image into the display canvas
+  const maxW = Math.min(window.innerWidth - 40, 630), maxH = window.innerHeight - 120;
+  if (!canvas) return;
+  scale = Math.min(maxW / canvas.w, maxH / canvas.h);
+  cv.width = Math.round(canvas.w * scale); cv.height = Math.round(canvas.h * scale);
+}
+
+function draw() {
+  if (!canvas) return;
+  ctx.clearRect(0,0,cv.width,cv.height);
+  ctx.drawImage(img, 0,0, cv.width, cv.height);
+  // outer = canvas edge
+  ctx.strokeStyle = '#34c75988'; ctx.lineWidth = 2; ctx.strokeRect(1,1,cv.width-2,cv.height-2);
+  // inner lines
+  ctx.strokeStyle = '#00e5ff'; ctx.lineWidth = 2;
+  const L=lines.left*scale, R=lines.right*scale, T=lines.top*scale, B=lines.bottom*scale;
+  ctx.beginPath();
+  ctx.moveTo(L,0); ctx.lineTo(L,cv.height);
+  ctx.moveTo(R,0); ctx.lineTo(R,cv.height);
+  ctx.moveTo(0,T); ctx.lineTo(cv.width,T);
+  ctx.moveTo(0,B); ctx.lineTo(cv.width,B);
+  ctx.stroke();
+  // handles
+  ctx.fillStyle = '#00e5ff';
+  [[L,cv.height/2],[R,cv.height/2],[cv.width/2,T],[cv.width/2,B]].forEach(([x,y])=>{
+    ctx.beginPath(); ctx.arc(x,y,7,0,7); ctx.fill();
+  });
+  updateReadout();
+}
+
+function updateReadout() {
+  const Lb=lines.left, Rb=canvas.w-lines.right, Tb=lines.top, Bb=canvas.h-lines.bottom;
+  const lr = 100*Lb/Math.max(Lb+Rb,1e-6), tb = 100*Tb/Math.max(Tb+Bb,1e-6);
+  document.getElementById('lr').textContent = `${lr.toFixed(0)} / ${(100-lr).toFixed(0)}`;
+  document.getElementById('tb').textContent = `${tb.toFixed(0)} / ${(100-tb).toFixed(0)}`;
+  const worst = Math.max(Math.abs(lr-50), Math.abs(tb-50));
+  const wl = worst<=Math.abs(lr-50) ? `${lr.toFixed(0)}/${(100-lr).toFixed(0)}` : `${tb.toFixed(0)}/${(100-tb).toFixed(0)}`;
+  document.getElementById('grade').textContent = `${(50+worst).toFixed(0)}/${(50-worst).toFixed(0)}`;
+}
+
+function nearest(x,y){ // which line is the pointer grabbing?
+  const L=lines.left*scale, R=lines.right*scale, T=lines.top*scale, B=lines.bottom*scale, t=18;
+  const cands=[['left',Math.abs(x-L)],['right',Math.abs(x-R)],['top',Math.abs(y-T)],['bottom',Math.abs(y-B)]];
+  cands.sort((a,b)=>a[1]-b[1]);
+  return cands[0][1] < t ? cands[0][0] : null;
+}
+
+function showLoupe(px,py){
+  const r = 3; // zoom factor
+  loupe.style.display='block';
+  loupe.style.left=(event.clientX-70)+'px'; loupe.style.top=(event.clientY-160)+'px';
+  lctx.clearRect(0,0,140,140);
+  const sx = px/scale, sy = py/scale, s=140/(2*r*10);
+  lctx.imageSmoothingEnabled=false;
+  lctx.drawImage(img, sx-23, sy-23, 46,46, 0,0,140,140);
+  lctx.strokeStyle='#00e5ff'; lctx.lineWidth=1;
+  lctx.beginPath(); lctx.moveTo(70,0);lctx.lineTo(70,140);lctx.moveTo(0,70);lctx.lineTo(140,70);lctx.stroke();
+}
+
+cv.addEventListener('pointerdown', e=>{
+  if(!lines) return;
+  const r=cv.getBoundingClientRect(), x=e.clientX-r.left, y=e.clientY-r.top;
+  dragging = nearest(x,y);
+  if(dragging){ cv.setPointerCapture(e.pointerId); move(e); }
+});
+cv.addEventListener('pointermove', move);
+cv.addEventListener('pointerup', ()=>{ dragging=null; loupe.style.display='none'; });
+function move(e){
+  if(!dragging) return;
+  const r=cv.getBoundingClientRect(), x=e.clientX-r.left, y=e.clientY-r.top;
+  if(dragging==='left'||dragging==='right') lines[dragging]=Math.max(0,Math.min(canvas.w,x/scale));
+  else lines[dragging]=Math.max(0,Math.min(canvas.h,y/scale));
+  draw();
+  showLoupe(dragging==='left'||dragging==='right'? x : cv.width/2,
+            dragging==='top'||dragging==='bottom'? y : cv.height/2);
+}
+
+document.getElementById('file').addEventListener('change', async e=>{
+  const f=e.target.files[0]; if(!f) return;
+  document.getElementById('status').textContent='rectifying…';
+  const fd=new FormData(); fd.append('file',f);
+  const res=await fetch(API+'/centering',{method:'POST',body:fd});
+  if(!res.ok){ document.getElementById('status').textContent='error '+res.status; return; }
+  const d=await res.json();
+  canvas=d.canvas; lines={...d.seed};
+  const fl=document.getElementById('flag');
+  fl.className='flag '+(d.seed_reliable?'hi':'lo');
+  fl.textContent = d.seed_reliable ? 'auto-seed: good — fine-tune' : 'auto-seed: rough — place the lines';
+  document.getElementById('status').textContent=`${d.detect_method} (${(d.detect_confidence*100|0)}%) · ${d.processing_time_ms|0}ms`;
+  img=new Image(); img.onload=()=>{ fit(); draw(); }; img.src=API+d.warped_url+'?t='+Date.now();
+});
+window.addEventListener('resize', ()=>{ if(canvas){ fit(); draw(); } });
+</script>
+</body>
+</html>

@@ -1445,6 +1445,10 @@ if STATIC_DIR.exists():
     async def detect_page():
         return FileResponse(str(STATIC_DIR / "detect.html"))
 
+    @app.get("/centering-ui", include_in_schema=False)
+    async def centering_page():
+        return FileResponse(str(STATIC_DIR / "centering.html"))
+
     @app.get("/scan", include_in_schema=False)
     async def scan_page():
         return FileResponse(str(STATIC_DIR / "scan.html"))
