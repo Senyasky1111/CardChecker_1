@@ -162,13 +162,18 @@ def detect_outer_quad(img: np.ndarray) -> "np.ndarray | None":
         return None                      # foreground too small -> not a confident card
     if area > 0.985 * H * W:
         return None                      # card bleeds to frame edges -> use full frame instead
+    box = order_corners(cv2.boxPoints(cv2.minAreaRect(big)).astype(np.float32))  # clean rotated rect
     peri = cv2.arcLength(big, True)
     approx = cv2.approxPolyDP(big, 0.02 * peri, True)
     if len(approx) == 4:
-        quad = approx.reshape(4, 2).astype(np.float32)
-    else:
-        quad = cv2.boxPoints(cv2.minAreaRect(big)).astype(np.float32)  # rotated-rect fallback
-    return order_corners(quad)
+        a = order_corners(approx.reshape(4, 2).astype(np.float32))
+        diag = max(np.linalg.norm(box[0] - box[2]), 1.0)
+        disp = float(np.max(np.linalg.norm(a - box, axis=1)) / diag)
+        # use the true (possibly perspective) quad ONLY when it clearly departs from a rectangle;
+        # otherwise the rotated-rect avoids the skew that approxPolyDP's jagged corners introduce
+        # on already-flat cards (e.g. scans / TAG studio images).
+        return a if disp > 0.02 else box
+    return box
 
 
 def rectify_for_centering(image: Image.Image, backend: str = "opencv") -> dict:
@@ -185,18 +190,17 @@ def rectify_for_centering(image: Image.Image, backend: str = "opencv") -> dict:
     # 1) background-subtraction outer quad (best for well-framed cards; avoids inner-frame lock)
     quad = detect_outer_quad(img)
     if quad is not None:
-        method, conf, found = "bg_quad", 0.9, True
+        # mask corners are already clean; do NOT cornerSubPix (it drifts onto internal
+        # text/art corners and skews an already-flat card).
+        corners, method, conf, found = order_corners(quad).astype(np.float32), "bg_quad", 0.9, True
     else:
-        # 2) edge/keypoint detector fallback (angled/cluttered shots)
         res = get_detector(backend).detect(image)
         if res.card_found and res.confidence >= 0.4:
             quad, method, conf, found = res.corners.astype(np.float32), res.method, float(res.confidence), True
         else:
-            # 3) full frame — never crop into the card; user adjusts
             quad = np.array([[0, 0], [W, 0], [W, H], [0, H]], dtype=np.float32)
             method, conf, found = "full_frame", 0.0, False
-
-    corners = CardDetector._refine_corners(gray, order_corners(quad).astype(np.float32))
+        corners = CardDetector._refine_corners(gray, order_corners(quad).astype(np.float32))
     mx, my = round(MARGIN_FRAC * CENTERING_W), round(MARGIN_FRAC * CENTERING_H)
     warped = warp_card_to(img, corners, CENTERING_W, CENTERING_H, mx, my)
     cw, ch = CENTERING_W + 2 * mx, CENTERING_H + 2 * my
