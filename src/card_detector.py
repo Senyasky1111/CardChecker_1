@@ -142,6 +142,11 @@ def detect_outer_quad(img: np.ndarray) -> "np.ndarray | None":
     art frame. Returns 4 ordered corners, or None if no clean foreground (card bleeds to edge
     or background too cluttered) — caller should then fall back to full-frame.
     """
+    # work on a downscaled copy (faster, bounded memory); scale corners back at the end
+    H0, W0 = img.shape[:2]
+    sc = min(1.0, 1400.0 / max(H0, W0))
+    if sc < 1.0:
+        img = cv2.resize(img, (int(W0 * sc), int(H0 * sc)), interpolation=cv2.INTER_AREA)
     H, W = img.shape[:2]
     c = max(10, int(0.02 * min(H, W)))
     corners_px = np.concatenate([
@@ -176,16 +181,17 @@ def detect_outer_quad(img: np.ndarray) -> "np.ndarray | None":
     # 1) genuine PERSPECTIVE (trapezoid) -> use the true 4-point quad
     peri = cv2.arcLength(big, True)
     approx = cv2.approxPolyDP(big, 0.02 * peri, True)
+    quad = None
     if len(approx) == 4:
         a = order_corners(approx.reshape(4, 2).astype(np.float32))
         diag = max(np.linalg.norm(box[0] - box[2]), 1.0)
         if float(np.max(np.linalg.norm(a - box, axis=1)) / diag) > 0.03:
-            return a
-    # 2) already STRAIGHT (axis-aligned & fills bbox) -> plain crop, NO warp/rotation
-    if tilt < 1.5 and fill > 0.90:
-        return bbox
-    # 3) merely ROTATED -> correct the rotation with the tight rotated rect
-    return box
+            quad = a
+    if quad is None:
+        # 2) already STRAIGHT (axis-aligned & fills bbox) -> plain crop, NO warp/rotation
+        # 3) merely ROTATED -> correct the rotation with the tight rotated rect
+        quad = bbox if (tilt < 1.5 and fill > 0.90) else box
+    return quad / sc if sc < 1.0 else quad   # back to full-res coords
 
 
 def rectify_for_centering(image: Image.Image, backend: str = "opencv") -> dict:
