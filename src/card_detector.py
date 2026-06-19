@@ -130,6 +130,41 @@ def warp_card_to(img: np.ndarray, corners: np.ndarray, W: int, H: int) -> Image.
     return Image.fromarray(cv2.warpPerspective(img, M, (W, H), flags=cv2.INTER_LANCZOS4))
 
 
+def detect_outer_quad(img: np.ndarray) -> "np.ndarray | None":
+    """Find the card's OUTER quad by background subtraction (card vs holder/table color),
+    robust for well-framed cards where edge-contour detectors wrongly lock onto the inner
+    art frame. Returns 4 ordered corners, or None if no clean foreground (card bleeds to edge
+    or background too cluttered) — caller should then fall back to full-frame.
+    """
+    H, W = img.shape[:2]
+    c = max(10, int(0.02 * min(H, W)))
+    corners_px = np.concatenate([
+        img[:c, :c].reshape(-1, 3), img[:c, -c:].reshape(-1, 3),
+        img[-c:, :c].reshape(-1, 3), img[-c:, -c:].reshape(-1, 3)]).astype(np.float32)
+    bg = np.median(corners_px, axis=0)
+    dist = np.sqrt(((img.astype(np.float32) - bg) ** 2).sum(-1))
+    mask = (dist > 40).astype(np.uint8) * 255
+    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k, iterations=2)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, k, iterations=1)
+    cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not cnts:
+        return None
+    big = max(cnts, key=cv2.contourArea)
+    area = cv2.contourArea(big)
+    if area < 0.25 * H * W:
+        return None                      # foreground too small -> not a confident card
+    if area > 0.985 * H * W:
+        return None                      # card bleeds to frame edges -> use full frame instead
+    peri = cv2.arcLength(big, True)
+    approx = cv2.approxPolyDP(big, 0.02 * peri, True)
+    if len(approx) == 4:
+        quad = approx.reshape(4, 2).astype(np.float32)
+    else:
+        quad = cv2.boxPoints(cv2.minAreaRect(big)).astype(np.float32)  # rotated-rect fallback
+    return order_corners(quad)
+
+
 def rectify_for_centering(image: Image.Image, backend: str = "opencv") -> dict:
     """Detect the outer card quad and rectify to a hi-res, aspect-exact (0.716) top-down view.
 
@@ -138,15 +173,29 @@ def rectify_for_centering(image: Image.Image, backend: str = "opencv") -> dict:
     canvas edges ARE the card edges; centering then only needs the 4 INNER frame lines.
     """
     img = np.array(image.convert("RGB"))
-    det = get_detector(backend)
-    res = det.detect(image)
+    H, W = img.shape[:2]
     gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
-    corners = CardDetector._refine_corners(gray, res.corners.astype(np.float32))
+
+    # 1) background-subtraction outer quad (best for well-framed cards; avoids inner-frame lock)
+    quad = detect_outer_quad(img)
+    if quad is not None:
+        method, conf, found = "bg_quad", 0.9, True
+    else:
+        # 2) edge/keypoint detector fallback (angled/cluttered shots)
+        res = get_detector(backend).detect(image)
+        if res.card_found and res.confidence >= 0.4:
+            quad, method, conf, found = res.corners.astype(np.float32), res.method, float(res.confidence), True
+        else:
+            # 3) full frame — never crop into the card; user adjusts
+            quad = np.array([[0, 0], [W, 0], [W, H], [0, H]], dtype=np.float32)
+            method, conf, found = "full_frame", 0.0, False
+
+    corners = CardDetector._refine_corners(gray, order_corners(quad).astype(np.float32))
     warped = warp_card_to(img, corners, CENTERING_W, CENTERING_H)
     return {
         "warped": warped, "W": CENTERING_W, "H": CENTERING_H,
-        "corners": corners, "confidence": float(res.confidence),
-        "method": res.method, "card_found": bool(res.card_found),
+        "corners": corners, "confidence": conf,
+        "method": method, "card_found": found,
     }
 
 
