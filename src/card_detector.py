@@ -118,16 +118,22 @@ def warp_card(img: np.ndarray, corners: np.ndarray) -> Image.Image:
 # aspect-exact canvas for centering ONLY.
 CENTERING_H = 1760
 CENTERING_W = round(CENTERING_H * CARD_ASPECT)   # 1260 -> aspect 0.7159
+MARGIN_FRAC = 0.10   # padding around the card in the rectified canvas, so the OUTER edge is
+                     # also draggable (and surrounding background is visible to place it on)
 
 
-def warp_card_to(img: np.ndarray, corners: np.ndarray, W: int, H: int) -> Image.Image:
-    """Warp quad to a W x H canvas (no orientation/aspect fudge beyond landscape rotate)."""
+def warp_card_to(img: np.ndarray, corners: np.ndarray, card_w: int, card_h: int,
+                 mx: int = 0, my: int = 0) -> Image.Image:
+    """Warp the card quad into the CENTER of a (card_w+2mx) x (card_h+2my) canvas; the margin
+    region samples the surrounding background so the user can nudge the outer edge into it."""
     ordered = order_corners(corners)
     if np.linalg.norm(ordered[1] - ordered[0]) > np.linalg.norm(ordered[3] - ordered[0]) * 1.1:
         ordered = np.roll(ordered, -1, axis=0)
-    dst = np.array([[0, 0], [W, 0], [W, H], [0, H]], dtype=np.float32)
+    cw, ch = card_w + 2 * mx, card_h + 2 * my
+    dst = np.array([[mx, my], [mx + card_w, my], [mx + card_w, my + card_h], [mx, my + card_h]],
+                   dtype=np.float32)
     M = cv2.getPerspectiveTransform(ordered.astype(np.float32), dst)
-    return Image.fromarray(cv2.warpPerspective(img, M, (W, H), flags=cv2.INTER_LANCZOS4))
+    return Image.fromarray(cv2.warpPerspective(img, M, (cw, ch), flags=cv2.INTER_LANCZOS4))
 
 
 def detect_outer_quad(img: np.ndarray) -> "np.ndarray | None":
@@ -191,26 +197,28 @@ def rectify_for_centering(image: Image.Image, backend: str = "opencv") -> dict:
             method, conf, found = "full_frame", 0.0, False
 
     corners = CardDetector._refine_corners(gray, order_corners(quad).astype(np.float32))
-    warped = warp_card_to(img, corners, CENTERING_W, CENTERING_H)
+    mx, my = round(MARGIN_FRAC * CENTERING_W), round(MARGIN_FRAC * CENTERING_H)
+    warped = warp_card_to(img, corners, CENTERING_W, CENTERING_H, mx, my)
+    cw, ch = CENTERING_W + 2 * mx, CENTERING_H + 2 * my
+    outer = {"left": mx, "top": my, "right": mx + CENTERING_W, "bottom": my + CENTERING_H}
     return {
-        "warped": warped, "W": CENTERING_W, "H": CENTERING_H,
-        "corners": corners, "confidence": conf,
+        "warped": warped, "W": cw, "H": ch,
+        "outer": outer, "corners": corners, "confidence": conf,
         "method": method, "card_found": found,
     }
 
 
-def seed_inner_frame(warped: Image.Image, max_frac: float = 0.30) -> dict:
-    """Rough seed of the 4 inner-frame lines on a rectified card via the longest straight
-    gradient edge inward from each canvas edge. UNRELIABLE across card eras (validated) — it is
-    only a STARTING guess for the interactive editor, NOT a measurement. Returns line positions
-    in canvas px + a low/high confidence flag so the UI can decide whether to trust it.
-    """
+def seed_inner_frame(warped: Image.Image, outer: dict, max_frac: float = 0.30) -> dict:
+    """Rough seed of the 4 inner-frame lines, scanning INWARD from the OUTER card edges (not the
+    padded canvas edge) via the longest straight gradient line. UNRELIABLE across eras (validated)
+    — only a starting guess; the UI lets the user drag. Returns line positions in canvas px."""
     a = np.asarray(warped.convert("RGB"), np.float32)
-    H, W = a.shape[:2]
     g = a.mean(2)
     gx = np.abs(np.diff(g, axis=1)); gx = np.pad(gx, ((0, 0), (0, 1)))
     gy = np.abs(np.diff(g, axis=0)); gy = np.pad(gy, ((0, 1), (0, 0)))
-    mx, my = int(max_frac * W), int(max_frac * H)
+    ol, ot, orr, ob = outer["left"], outer["top"], outer["right"], outer["bottom"]
+    cw, ch = orr - ol, ob - ot
+    mx, my = int(max_frac * cw), int(max_frac * ch)
 
     def line(grad, axis, lo, hi, s0, s1):
         if hi <= lo:
@@ -222,23 +230,26 @@ def seed_inner_frame(warped: Image.Image, max_frac: float = 0.30) -> dict:
         score = np.convolve(score, np.ones(5) / 5, mode="same")
         i = int(np.argmax(score)); return lo + i, float(score[i])
 
-    il, cl = line(gx, "v", 4, mx, int(0.25 * H), int(0.75 * H))
-    ir, cr = line(gx, "v", W - mx, W - 4, int(0.25 * H), int(0.75 * H))
-    it, ct = line(gy, "h", 4, my, int(0.25 * W), int(0.75 * W))
-    ib, cb = line(gy, "h", H - my, H - 4, int(0.25 * W), int(0.75 * W))
+    sx0, sx1 = ot + int(0.25 * ch), ot + int(0.75 * ch)
+    sy0, sy1 = ol + int(0.25 * cw), ol + int(0.75 * cw)
+    il, cl = line(gx, "v", ol + 4, ol + mx, sx0, sx1)
+    ir, cr = line(gx, "v", orr - mx, orr - 4, sx0, sx1)
+    it, ct = line(gy, "h", ot + 4, ot + my, sy0, sy1)
+    ib, cb = line(gy, "h", ob - my, ob - 4, sy0, sy1)
     conf = float(min(cl, cr, ct, cb))
     return {"left": il, "right": ir, "top": it, "bottom": ib,
             "confidence": round(conf, 3), "reliable": conf >= 0.5}
 
 
-def compute_centering(W: int, H: int, left: float, right: float, top: float, bottom: float) -> dict:
-    """Given the 4 inner-frame line positions (canvas px; outer edges are the canvas 0..W/0..H),
-    compute per-axis centering %. Worst axis drives the grade (PSA/TAG convention)."""
-    Lb, Rb = max(left, 0.0), max(W - right, 0.0)
-    Tb, Bb = max(top, 0.0), max(H - bottom, 0.0)
+def compute_centering(outer: dict, inner: dict) -> dict:
+    """Centering % from OUTER card edges and INNER frame lines (canvas px). Border width on each
+    side = inner − outer. Worst axis drives the grade (PSA/TAG convention)."""
+    Lb = max(inner["left"] - outer["left"], 0.0)
+    Rb = max(outer["right"] - inner["right"], 0.0)
+    Tb = max(inner["top"] - outer["top"], 0.0)
+    Bb = max(outer["bottom"] - inner["bottom"], 0.0)
     lr = 100 * Lb / max(Lb + Rb, 1e-6)
     tb = 100 * Tb / max(Tb + Bb, 1e-6)
-    # worst-axis offset from perfect 50/50
     worst = max(abs(lr - 50), abs(tb - 50))
     return {
         "lr": [round(lr, 1), round(100 - lr, 1)],

@@ -645,7 +645,7 @@ async def centering_endpoint(
 
     t0 = time.time()
     rect = rectify_for_centering(image, backend=backend)
-    seed = seed_inner_frame(rect["warped"])
+    seed = seed_inner_frame(rect["warped"], rect["outer"])
     elapsed_ms = (time.time() - t0) * 1000
 
     import hashlib
@@ -656,7 +656,7 @@ async def centering_endpoint(
     return {
         "warped_url": f"/static/{warp_name}",
         "canvas": {"w": rect["W"], "h": rect["H"]},
-        "outer": {"left": 0, "top": 0, "right": rect["W"], "bottom": rect["H"]},
+        "outer": rect["outer"],          # card edge (draggable in the UI; sits inside the margin)
         "seed": {k: seed[k] for k in ("left", "right", "top", "bottom")},
         "seed_reliable": seed["reliable"],
         "detect_method": rect["method"],
@@ -665,21 +665,27 @@ async def centering_endpoint(
     }
 
 
-class CenteringComputeRequest(BaseModel):
-    w: float
-    h: float
+class _Lines(BaseModel):
     left: float
     right: float
     top: float
     bottom: float
 
 
+class CenteringComputeRequest(BaseModel):
+    outer: _Lines
+    inner: _Lines
+
+
 @app.post("/centering/compute")
 async def centering_compute_endpoint(req: CenteringComputeRequest):
-    """Given the (user-adjusted) 4 inner-frame line positions in canvas px, return per-axis
-    centering % (L/R, T/B) and the worst-axis offset. Pure math — the client can also do this
-    locally for a live preview; this endpoint is the authoritative server-side value."""
-    return compute_centering(req.w, req.h, req.left, req.right, req.top, req.bottom)
+    """Given (user-adjusted) OUTER card edges + INNER frame lines in canvas px, return per-axis
+    centering % and worst-axis offset. The client also computes this live; this is authoritative."""
+    o, i = req.outer, req.inner
+    return compute_centering(
+        {"left": o.left, "right": o.right, "top": o.top, "bottom": o.bottom},
+        {"left": i.left, "right": i.right, "top": i.top, "bottom": i.bottom},
+    )
 
 
 @app.post("/identify-v2", response_model=IdentifyV2Response)

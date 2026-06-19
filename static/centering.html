@@ -64,74 +64,75 @@
 <canvas id="loupe" width="140" height="140"></canvas>
 
 <script>
-const API = location.origin;           // serve this page from the FastAPI app
+const API = location.origin;
 const cv = document.getElementById('card'), ctx = cv.getContext('2d');
 const loupe = document.getElementById('loupe'), lctx = loupe.getContext('2d');
-let img = new Image(), canvas = null;  // canvas dims from server (rectified px)
-let lines = null;                      // {left,right,top,bottom} in canvas px
-let scale = 1, dragging = null;
+let img = new Image(), canvas = null;
+let outer = null, inner = null;        // {left,right,top,bottom} in canvas px
+let scale = 1, dragging = null;        // dragging = ['outer'|'inner', side]
+let lastClientX = 0, lastClientY = 0;
 
-function fit() {                        // fit rectified image into the display canvas
-  const maxW = Math.min(window.innerWidth - 40, 630), maxH = window.innerHeight - 120;
+function fit() {
+  const maxW = Math.min(window.innerWidth - 40, 700), maxH = window.innerHeight - 120;
   if (!canvas) return;
   scale = Math.min(maxW / canvas.w, maxH / canvas.h);
   cv.width = Math.round(canvas.w * scale); cv.height = Math.round(canvas.h * scale);
 }
 
+function vline(x){ ctx.moveTo(x,0); ctx.lineTo(x,cv.height); }
+function hline(y){ ctx.moveTo(0,y); ctx.lineTo(cv.width,y); }
+
 function draw() {
   if (!canvas) return;
   ctx.clearRect(0,0,cv.width,cv.height);
   ctx.drawImage(img, 0,0, cv.width, cv.height);
-  // outer = canvas edge
-  ctx.strokeStyle = '#34c75988'; ctx.lineWidth = 2; ctx.strokeRect(1,1,cv.width-2,cv.height-2);
-  // inner lines
-  ctx.strokeStyle = '#00e5ff'; ctx.lineWidth = 2;
-  const L=lines.left*scale, R=lines.right*scale, T=lines.top*scale, B=lines.bottom*scale;
-  ctx.beginPath();
-  ctx.moveTo(L,0); ctx.lineTo(L,cv.height);
-  ctx.moveTo(R,0); ctx.lineTo(R,cv.height);
-  ctx.moveTo(0,T); ctx.lineTo(cv.width,T);
-  ctx.moveTo(0,B); ctx.lineTo(cv.width,B);
-  ctx.stroke();
-  // handles
-  ctx.fillStyle = '#00e5ff';
-  [[L,cv.height/2],[R,cv.height/2],[cv.width/2,T],[cv.width/2,B]].forEach(([x,y])=>{
-    ctx.beginPath(); ctx.arc(x,y,7,0,7); ctx.fill();
-  });
+  const setS = s => ({L:s.left*scale, R:s.right*scale, T:s.top*scale, B:s.bottom*scale});
+  // outer = green (card edge), inner = cyan (frame)
+  for (const [s, col] of [[setS(outer),'#34c759'], [setS(inner),'#00e5ff']]) {
+    ctx.strokeStyle = col; ctx.lineWidth = 2; ctx.beginPath();
+    vline(s.L); vline(s.R); hline(s.T); hline(s.B); ctx.stroke();
+    ctx.fillStyle = col;
+    [[s.L,cv.height/2],[s.R,cv.height/2],[cv.width/2,s.T],[cv.width/2,s.B]].forEach(([x,y])=>{
+      ctx.beginPath(); ctx.arc(x,y,7,0,7); ctx.fill();
+    });
+  }
   updateReadout();
 }
 
 function updateReadout() {
-  const Lb=lines.left, Rb=canvas.w-lines.right, Tb=lines.top, Bb=canvas.h-lines.bottom;
+  const Lb=inner.left-outer.left, Rb=outer.right-inner.right;
+  const Tb=inner.top-outer.top, Bb=outer.bottom-inner.bottom;
   const lr = 100*Lb/Math.max(Lb+Rb,1e-6), tb = 100*Tb/Math.max(Tb+Bb,1e-6);
   document.getElementById('lr').textContent = `${lr.toFixed(0)} / ${(100-lr).toFixed(0)}`;
   document.getElementById('tb').textContent = `${tb.toFixed(0)} / ${(100-tb).toFixed(0)}`;
   const worst = Math.max(Math.abs(lr-50), Math.abs(tb-50));
-  const wl = worst<=Math.abs(lr-50) ? `${lr.toFixed(0)}/${(100-lr).toFixed(0)}` : `${tb.toFixed(0)}/${(100-tb).toFixed(0)}`;
   document.getElementById('grade').textContent = `${(50+worst).toFixed(0)}/${(50-worst).toFixed(0)}`;
 }
 
-function nearest(x,y){ // which line is the pointer grabbing?
-  const L=lines.left*scale, R=lines.right*scale, T=lines.top*scale, B=lines.bottom*scale, t=18;
-  const cands=[['left',Math.abs(x-L)],['right',Math.abs(x-R)],['top',Math.abs(y-T)],['bottom',Math.abs(y-B)]];
-  cands.sort((a,b)=>a[1]-b[1]);
-  return cands[0][1] < t ? cands[0][0] : null;
+function nearest(x,y){ // grab the closest of all 8 lines
+  const t=16; let best=null, bd=t;
+  for (const grp of ['outer','inner']) {
+    const s = grp==='outer'?outer:inner;
+    const checks=[['left',Math.abs(x-s.left*scale)],['right',Math.abs(x-s.right*scale)],
+                  ['top',Math.abs(y-s.top*scale)],['bottom',Math.abs(y-s.bottom*scale)]];
+    for (const [side,d] of checks) if (d<bd){ bd=d; best=[grp,side]; }
+  }
+  return best;
 }
 
 function showLoupe(px,py){
-  const r = 3; // zoom factor
   loupe.style.display='block';
-  loupe.style.left=(event.clientX-70)+'px'; loupe.style.top=(event.clientY-160)+'px';
+  loupe.style.left=(lastClientX-70)+'px'; loupe.style.top=(lastClientY-160)+'px';
   lctx.clearRect(0,0,140,140);
-  const sx = px/scale, sy = py/scale, s=140/(2*r*10);
+  const sx=px/scale, sy=py/scale;
   lctx.imageSmoothingEnabled=false;
   lctx.drawImage(img, sx-23, sy-23, 46,46, 0,0,140,140);
-  lctx.strokeStyle='#00e5ff'; lctx.lineWidth=1;
+  lctx.strokeStyle='#fff'; lctx.lineWidth=1;
   lctx.beginPath(); lctx.moveTo(70,0);lctx.lineTo(70,140);lctx.moveTo(0,70);lctx.lineTo(140,70);lctx.stroke();
 }
 
 cv.addEventListener('pointerdown', e=>{
-  if(!lines) return;
+  if(!outer) return;
   const r=cv.getBoundingClientRect(), x=e.clientX-r.left, y=e.clientY-r.top;
   dragging = nearest(x,y);
   if(dragging){ cv.setPointerCapture(e.pointerId); move(e); }
@@ -140,12 +141,14 @@ cv.addEventListener('pointermove', move);
 cv.addEventListener('pointerup', ()=>{ dragging=null; loupe.style.display='none'; });
 function move(e){
   if(!dragging) return;
+  lastClientX=e.clientX; lastClientY=e.clientY;
   const r=cv.getBoundingClientRect(), x=e.clientX-r.left, y=e.clientY-r.top;
-  if(dragging==='left'||dragging==='right') lines[dragging]=Math.max(0,Math.min(canvas.w,x/scale));
-  else lines[dragging]=Math.max(0,Math.min(canvas.h,y/scale));
+  const [grp,side]=dragging, s = grp==='outer'?outer:inner;
+  if(side==='left'||side==='right') s[side]=Math.max(0,Math.min(canvas.w,x/scale));
+  else s[side]=Math.max(0,Math.min(canvas.h,y/scale));
   draw();
-  showLoupe(dragging==='left'||dragging==='right'? x : cv.width/2,
-            dragging==='top'||dragging==='bottom'? y : cv.height/2);
+  showLoupe((side==='left'||side==='right')? x : cv.width/2,
+            (side==='top'||side==='bottom')? y : cv.height/2);
 }
 
 document.getElementById('file').addEventListener('change', async e=>{
@@ -155,7 +158,7 @@ document.getElementById('file').addEventListener('change', async e=>{
   const res=await fetch(API+'/centering',{method:'POST',body:fd});
   if(!res.ok){ document.getElementById('status').textContent='error '+res.status; return; }
   const d=await res.json();
-  canvas=d.canvas; lines={...d.seed};
+  canvas=d.canvas; outer={...d.outer}; inner={...d.seed};
   const fl=document.getElementById('flag');
   fl.className='flag '+(d.seed_reliable?'hi':'lo');
   fl.textContent = d.seed_reliable ? 'auto-seed: good — fine-tune' : 'auto-seed: rough — place the lines';
