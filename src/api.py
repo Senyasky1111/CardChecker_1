@@ -783,26 +783,23 @@ async def search_cards(
     # not every card numbered 199).
     deferred_name_rows: Optional[list[dict]] = None
     if number is not None and name:
-        name_rows = matcher._query_by_name(name, limit=50, lang=lang)
-        if not name_rows and not set_code:
-            name_rows = matcher._query_by_name_fuzzy(name, limit=50, lang=lang)
-        # Does the token match a real card name exactly, or only loosely (LIKE)?
-        # An exact name ("Mew") beats a set-code guess; a loose one ("SVE",
-        # which only substring-matches "Sabrina's Venonat") should not.
         norm = _normalize_card_name(name)
-        is_exact_name = any(r.get("name_normalized") == norm for r in name_rows)
-        # name + exact collector number (prefer an exact set-total match too)
-        num_match = [r for r in name_rows if r.get("collector_number") == number]
-        num_match.sort(
-            key=lambda r: 0 if (total is not None and r.get("set_total") == total) else 1
-        )
+        # Is the token a REAL exact card name ("Mew"), or only a loose/set-code
+        # token ("SVE", which just substring-matches "Sabrina's Venonat")? Probe
+        # with an exact-first lookup so the answer doesn't depend on whether the
+        # base card happens to be in a trend-sorted top-N.
+        exact_probe = matcher._query_by_name(name, limit=1, lang=lang)
+        is_exact_name = bool(exact_probe) and exact_probe[0].get("name_normalized") == norm
+        # name + collector number, direct SQL ("gengar 114" -> "Gengar EX" #114).
+        num_match = matcher._query_name_and_number(name, number, total=total, lang=lang)
         if is_exact_name or not set_code:
             _add(num_match)
-            _add(name_rows)
-        else:
-            # Leading token looks more like a set code than a name — let the
-            # set-code path lead and keep loose name matches as a late fallback.
-            deferred_name_rows = name_rows
+        # Broad name matches (variants / same family) are a LATE fallback, added
+        # after the number strategies — otherwise the wide substring set
+        # ("mew" -> Mewtwo, Mew ex, ...) floods an ambiguous combo and buries the
+        # actual name+number hit. When set_code looks more likely than a name,
+        # the set-code path also gets to lead before these.
+        deferred_name_rows = matcher._query_by_name_substring(name, limit=50, lang=lang)
 
     # NUMBER strategies — most specific first; also the only path when no name.
     if number is not None and set_code:
@@ -817,9 +814,10 @@ async def search_cards(
     if deferred_name_rows:
         _add(deferred_name_rows)
 
-    # NAME only — exact/LIKE first, then typo-tolerant fuzzy fallback.
+    # NAME only — substring match (all variants: "gengar" -> "Gengar EX" too),
+    # then typo-tolerant fuzzy fallback.
     if name and number is None:
-        _add(matcher._query_by_name(name, limit=limit, lang=lang))
+        _add(matcher._query_by_name_substring(name, limit=limit, lang=lang))
         if not ordered:
             _add(matcher._query_by_name_fuzzy(name, limit=limit, lang=lang))
 

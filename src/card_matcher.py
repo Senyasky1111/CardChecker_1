@@ -471,6 +471,73 @@ class CardMatcher:
         ).fetchall()
         return [_row_to_dict(r) for r in rows]
 
+    def _query_by_name_substring(
+        self, name: str, limit: int = 20, lang: str | None = None
+    ) -> list[dict]:
+        """Substring name search for MANUAL search (not photo ID).
+
+        Returns every card whose name CONTAINS the query, so "gengar" also
+        yields "Gengar EX", "Gengar V", "M Gengar EX", etc. Exact-name matches
+        rank first, then by price trend. Unlike `_query_by_name` (exact-first,
+        short-circuits), this never hides variants behind the base card.
+        """
+        normalized = _normalize_name(name)
+        if not normalized:
+            return []
+
+        lang_clause = " AND c.language = ?" if lang else ""
+        params: list = [f"%{normalized}%"]
+        if lang:
+            params.append(lang)
+        params.append(limit)
+
+        # Rank by price trend so notable variants (EX/VMAX/full-arts) surface
+        # instead of being buried under many cheap reprints of the base card.
+        rows = self.conn.execute(
+            _SELECT_SQL + f"""
+            WHERE c.name_normalized LIKE ?{lang_clause}
+            ORDER BY p.trend DESC NULLS LAST
+            LIMIT ?""",
+            params,
+        ).fetchall()
+        return [_row_to_dict(r) for r in rows]
+
+    def _query_name_and_number(
+        self,
+        name: str,
+        number: int,
+        total: int | None = None,
+        lang: str | None = None,
+        limit: int = 50,
+    ) -> list[dict]:
+        """Manual-search combo: cards whose name CONTAINS the query AND match the
+        collector number (so "gengar 114" finds "Gengar EX" #114). Exact-name +
+        exact-total matches rank first. Direct SQL, so the right card is never
+        truncated out of a trend-sorted top-N like a post-filter would.
+        """
+        norm = _normalize_name(name)
+        if not norm:
+            return []
+        lang_clause = " AND c.language = ?" if lang else ""
+        params: list = [f"%{norm}%", number]
+        if lang:
+            params.append(lang)
+        params.append(limit)
+        rows = self.conn.execute(
+            _SELECT_SQL + f"""
+            WHERE c.name_normalized LIKE ? AND c.collector_number = ?{lang_clause}
+            ORDER BY p.trend DESC NULLS LAST
+            LIMIT ?""",
+            params,
+        ).fetchall()
+        result = [_row_to_dict(r) for r in rows]
+        result.sort(key=lambda c: (
+            0 if c.get("name_normalized") == norm else 1,
+            0 if (total is not None and c.get("set_total") == total) else 1,
+            _lang_priority(c),
+        ))
+        return result
+
     def _query_by_name_fuzzy(
         self, name: str, limit: int = 20, lang: str | None = None, threshold: int = 80
     ) -> list[dict]:
