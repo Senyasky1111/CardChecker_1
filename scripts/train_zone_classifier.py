@@ -70,7 +70,8 @@ def main():
     print(f"train={len(tr)} (clean={int((labels==0).sum())}, wear={int((labels==1).sum())}) device={device}")
     model = timm.create_model(args.backbone, pretrained=bool(args.pretrained), num_classes=2).to(device)
     # class-weighted loss as well (precision matters)
-    cw = torch.tensor([1.0, float((labels == 0).sum()) / max((labels == 1).sum(), 1)], device=device).clamp(0.3, 3)
+    cw = torch.tensor([1.0, float((labels == 0).sum()) / max(int((labels == 1).sum()), 1)],
+                      dtype=torch.float32, device=device).clamp(0.3, 3)
     crit = nn.CrossEntropyLoss(weight=cw)
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
     sched = torch.optim.lr_scheduler.OneCycleLR(opt, max_lr=args.lr, total_steps=args.epochs * len(dl_tr), pct_start=0.1)
