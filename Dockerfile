@@ -3,8 +3,11 @@
 
 FROM python:3.11-slim
 
-# System dependencies for OpenCV, EasyOCR, Tesseract
+# System dependencies for OpenCV, EasyOCR, Tesseract.
+# build-essential (gcc/g++) is required to compile wheels that ship no
+# prebuilt binary (e.g. stringzilla, pulled in by python-doctr).
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
     libgl1 \
     libglib2.0-0 \
     libsm6 \
