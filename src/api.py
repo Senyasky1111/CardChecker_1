@@ -1453,7 +1453,8 @@ if STATIC_DIR.exists():
 
     @app.get("/centering-ui", include_in_schema=False)
     async def centering_page():
-        return FileResponse(str(STATIC_DIR / "centering.html"))
+        return FileResponse(str(STATIC_DIR / "centering.html"),
+                            headers={"Cache-Control": "no-store, max-age=0"})
 
     @app.get("/scan", include_in_schema=False)
     async def scan_page():

@@ -118,7 +118,7 @@ def warp_card(img: np.ndarray, corners: np.ndarray) -> Image.Image:
 # aspect-exact canvas for centering ONLY.
 CENTERING_H = 1760
 CENTERING_W = round(CENTERING_H * CARD_ASPECT)   # 1260 -> aspect 0.7159
-MARGIN_FRAC = 0.10   # padding around the card in the rectified canvas, so the OUTER edge is
+MARGIN_FRAC = 0.08   # padding around the card in the rectified canvas, so the OUTER edge is
                      # also draggable (and surrounding background is visible to place it on)
 
 
