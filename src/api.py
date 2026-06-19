@@ -35,7 +35,10 @@ from fastapi.responses import FileResponse
 from PIL import Image
 from pydantic import BaseModel
 
-from src.card_detector import get_detector, visualize_detection
+from src.card_detector import (
+    get_detector, visualize_detection,
+    rectify_for_centering, seed_inner_frame, compute_centering,
+)
 from src.card_matcher import CardMatcher, MatchResult, _normalize_name as _normalize_card_name
 from src.text_index import parse_search_query
 from src.cardmarket_url import card_url
@@ -621,6 +624,62 @@ async def detect_card_endpoint(
             response_data["warped_url"] = f"/static/{warp_name}"
 
     return response_data
+
+
+@app.post("/centering")
+async def centering_endpoint(
+    file: UploadFile = File(...),
+    backend: str = Query(default="opencv", description="opencv (no expand) recommended"),
+):
+    """Rectify a card to a hi-res, aspect-exact (0.716) top-down view for CENTERING.
+
+    Returns the rectified image URL + canvas dims + a ROUGH inner-frame seed (4 line positions
+    in canvas px) + a `reliable` flag. The seed is only a starting guess — the client lets the
+    user drag the 4 inner lines to the true frame, then calls /centering/compute (or computes
+    locally) for the precise ratio. Outer edges = the canvas edges (the card fills the canvas).
+    """
+    if not file.content_type or not file.content_type.startswith("image/"):
+        raise HTTPException(status_code=400, detail="File must be an image")
+    contents = await file.read()
+    image = Image.open(io.BytesIO(contents)).convert("RGB")
+
+    t0 = time.time()
+    rect = rectify_for_centering(image, backend=backend)
+    seed = seed_inner_frame(rect["warped"])
+    elapsed_ms = (time.time() - t0) * 1000
+
+    import hashlib
+    fh = hashlib.md5(contents[:1024]).hexdigest()[:8]
+    warp_name = f"centering_{fh}.jpg"
+    rect["warped"].save(f"static/{warp_name}")
+
+    return {
+        "warped_url": f"/static/{warp_name}",
+        "canvas": {"w": rect["W"], "h": rect["H"]},
+        "outer": {"left": 0, "top": 0, "right": rect["W"], "bottom": rect["H"]},
+        "seed": {k: seed[k] for k in ("left", "right", "top", "bottom")},
+        "seed_reliable": seed["reliable"],
+        "detect_method": rect["method"],
+        "detect_confidence": round(rect["confidence"], 4),
+        "processing_time_ms": round(elapsed_ms, 1),
+    }
+
+
+class CenteringComputeRequest(BaseModel):
+    w: float
+    h: float
+    left: float
+    right: float
+    top: float
+    bottom: float
+
+
+@app.post("/centering/compute")
+async def centering_compute_endpoint(req: CenteringComputeRequest):
+    """Given the (user-adjusted) 4 inner-frame line positions in canvas px, return per-axis
+    centering % (L/R, T/B) and the worst-axis offset. Pure math — the client can also do this
+    locally for a live preview; this endpoint is the authoritative server-side value."""
+    return compute_centering(req.w, req.h, req.left, req.right, req.top, req.bottom)
 
 
 @app.post("/identify-v2", response_model=IdentifyV2Response)

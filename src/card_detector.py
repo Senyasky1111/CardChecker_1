@@ -110,6 +110,94 @@ def warp_card(img: np.ndarray, corners: np.ndarray) -> Image.Image:
     return Image.fromarray(warped)
 
 
+# ------------------------------------------------------------------
+# Centering: high-res, aspect-correct rectification + measurement
+# ------------------------------------------------------------------
+# The OCR canvas (600x825) has aspect 0.727 (a ~1.5% error vs the true 0.716) and is too
+# low-res for ~1% centering (border band ~43px -> 1px = 0.83%). Use a dedicated hi-res,
+# aspect-exact canvas for centering ONLY.
+CENTERING_H = 1760
+CENTERING_W = round(CENTERING_H * CARD_ASPECT)   # 1260 -> aspect 0.7159
+
+
+def warp_card_to(img: np.ndarray, corners: np.ndarray, W: int, H: int) -> Image.Image:
+    """Warp quad to a W x H canvas (no orientation/aspect fudge beyond landscape rotate)."""
+    ordered = order_corners(corners)
+    if np.linalg.norm(ordered[1] - ordered[0]) > np.linalg.norm(ordered[3] - ordered[0]) * 1.1:
+        ordered = np.roll(ordered, -1, axis=0)
+    dst = np.array([[0, 0], [W, 0], [W, H], [0, H]], dtype=np.float32)
+    M = cv2.getPerspectiveTransform(ordered.astype(np.float32), dst)
+    return Image.fromarray(cv2.warpPerspective(img, M, (W, H), flags=cv2.INTER_LANCZOS4))
+
+
+def rectify_for_centering(image: Image.Image, backend: str = "opencv") -> dict:
+    """Detect the outer card quad and rectify to a hi-res, aspect-exact (0.716) top-down view.
+
+    Uses OpenCV by default (no YOLO `_expand_corners`, which pushes corners outward 2% for OCR
+    and is harmful for centering). Returns the rectified PIL image + metadata. The rectified
+    canvas edges ARE the card edges; centering then only needs the 4 INNER frame lines.
+    """
+    img = np.array(image.convert("RGB"))
+    det = get_detector(backend)
+    res = det.detect(image)
+    gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+    corners = CardDetector._refine_corners(gray, res.corners.astype(np.float32))
+    warped = warp_card_to(img, corners, CENTERING_W, CENTERING_H)
+    return {
+        "warped": warped, "W": CENTERING_W, "H": CENTERING_H,
+        "corners": corners, "confidence": float(res.confidence),
+        "method": res.method, "card_found": bool(res.card_found),
+    }
+
+
+def seed_inner_frame(warped: Image.Image, max_frac: float = 0.30) -> dict:
+    """Rough seed of the 4 inner-frame lines on a rectified card via the longest straight
+    gradient edge inward from each canvas edge. UNRELIABLE across card eras (validated) — it is
+    only a STARTING guess for the interactive editor, NOT a measurement. Returns line positions
+    in canvas px + a low/high confidence flag so the UI can decide whether to trust it.
+    """
+    a = np.asarray(warped.convert("RGB"), np.float32)
+    H, W = a.shape[:2]
+    g = a.mean(2)
+    gx = np.abs(np.diff(g, axis=1)); gx = np.pad(gx, ((0, 0), (0, 1)))
+    gy = np.abs(np.diff(g, axis=0)); gy = np.pad(gy, ((0, 1), (0, 0)))
+    mx, my = int(max_frac * W), int(max_frac * H)
+
+    def line(grad, axis, lo, hi, s0, s1):
+        if hi <= lo:
+            return lo, 0.0
+        if axis == "v":
+            band = grad[s0:s1, lo:hi]; score = (band > np.percentile(band, 75)).mean(0)
+        else:
+            band = grad[lo:hi, s0:s1]; score = (band > np.percentile(band, 75)).mean(1)
+        score = np.convolve(score, np.ones(5) / 5, mode="same")
+        i = int(np.argmax(score)); return lo + i, float(score[i])
+
+    il, cl = line(gx, "v", 4, mx, int(0.25 * H), int(0.75 * H))
+    ir, cr = line(gx, "v", W - mx, W - 4, int(0.25 * H), int(0.75 * H))
+    it, ct = line(gy, "h", 4, my, int(0.25 * W), int(0.75 * W))
+    ib, cb = line(gy, "h", H - my, H - 4, int(0.25 * W), int(0.75 * W))
+    conf = float(min(cl, cr, ct, cb))
+    return {"left": il, "right": ir, "top": it, "bottom": ib,
+            "confidence": round(conf, 3), "reliable": conf >= 0.5}
+
+
+def compute_centering(W: int, H: int, left: float, right: float, top: float, bottom: float) -> dict:
+    """Given the 4 inner-frame line positions (canvas px; outer edges are the canvas 0..W/0..H),
+    compute per-axis centering %. Worst axis drives the grade (PSA/TAG convention)."""
+    Lb, Rb = max(left, 0.0), max(W - right, 0.0)
+    Tb, Bb = max(top, 0.0), max(H - bottom, 0.0)
+    lr = 100 * Lb / max(Lb + Rb, 1e-6)
+    tb = 100 * Tb / max(Tb + Bb, 1e-6)
+    # worst-axis offset from perfect 50/50
+    worst = max(abs(lr - 50), abs(tb - 50))
+    return {
+        "lr": [round(lr, 1), round(100 - lr, 1)],
+        "tb": [round(tb, 1), round(100 - tb, 1)],
+        "worst_axis_offset_pct": round(worst, 1),
+    }
+
+
 def visualize_detection(
     image: Image.Image,
     result: DetectionResult,
