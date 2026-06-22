@@ -96,6 +96,11 @@ def grade_counts(token: str, email: str) -> tuple[int, int]:
     for t in rows:
         if t.get("reason") != GRADE_REASON:
             continue
+        # belt-and-suspenders: also enforce ownership in-process, in case the server-side
+        # `q` filter is ignored/mis-shaped (otherwise we'd count other users' grades).
+        owner = t.get("created_by")
+        if owner and owner != email:
+            continue
         cd = t.get("created_date") or t.get("created_at") or ""
         try:
             ts = _dt.datetime.fromisoformat(str(cd).replace("Z", "+00:00"))
