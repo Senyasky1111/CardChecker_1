@@ -1584,11 +1584,12 @@ async def grade_card_endpoint(
     except anthropic.APITimeoutError:
         _release()
         raise HTTPException(status_code=504, detail="Grading timed out, please retry")
-    except (anthropic.APIConnectionError, anthropic.InternalServerError) as e:
-        # upstream unavailable / 'overloaded' (529) / other 5xx — retryable
+    except (anthropic.OverloadedError, anthropic.InternalServerError, anthropic.APIConnectionError) as e:
+        # 'overloaded' (529, OverloadedError subclasses APIStatusError — NOT InternalServerError),
+        # upstream 5xx, or connection failure — all transient/retryable.
         _release()
         print(f"/grade upstream error: {type(e).__name__}: {e}")
-        raise HTTPException(status_code=503, detail="Grading temporarily unavailable, please retry")
+        raise HTTPException(status_code=503, detail="Grading service is busy, please retry in a moment")
     except (_json.JSONDecodeError, KeyError) as e:
         # grader returned empty / non-JSON / missing fields
         _release()
