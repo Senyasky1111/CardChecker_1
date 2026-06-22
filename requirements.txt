@@ -34,6 +34,10 @@ python-doctr[torch]>=0.9.0  # DocTR text-based card detector (fallback)
 # Gemini AI (alternative recognition & grading)
 google-genai>=1.0.0
 
+# Claude grading (pregrading /grade endpoint) — pin exact: uses newer SDK params
+# (output_config json_schema, thinking=adaptive, effort) that require this floor.
+anthropic==0.111.0
+
 # Dev / Testing
 pytest>=7.0.0
 httpx>=0.24.0

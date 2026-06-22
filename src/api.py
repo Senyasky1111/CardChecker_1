@@ -1520,10 +1520,24 @@ async def grade_card_endpoint(
 
     from fastapi.concurrency import run_in_threadpool
     from src.pregrade_service import grade_card
+    import json as _json
+    import anthropic
     try:
         result = await run_in_threadpool(grade_card, _claude_grader, front_bytes, back_bytes)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    except anthropic.RateLimitError:
+        raise HTTPException(status_code=429, detail="Grading is busy, please retry shortly")
+    except anthropic.APITimeoutError:
+        raise HTTPException(status_code=504, detail="Grading timed out, please retry")
+    except (anthropic.APIConnectionError, anthropic.InternalServerError) as e:
+        # upstream unavailable / 'overloaded' (529) / other 5xx — retryable
+        print(f"/grade upstream error: {type(e).__name__}: {e}")
+        raise HTTPException(status_code=503, detail="Grading temporarily unavailable, please retry")
+    except (_json.JSONDecodeError, KeyError) as e:
+        # grader returned empty / non-JSON / missing fields
+        print(f"/grade parse error: {type(e).__name__}: {e}")
+        raise HTTPException(status_code=502, detail="Grading returned an unexpected response, please retry")
     except Exception as e:
         # Anthropic/runtime failure — don't leak internals; log server-side.
         print(f"/grade failed: {type(e).__name__}: {e}")
