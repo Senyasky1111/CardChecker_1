@@ -14,10 +14,12 @@ import math
 # the per-fold CV values were 1.65/-5.47 and 1.46/-3.93 (mean ~1.55/-4.7).
 CAL_A, CAL_B = 1.58, -4.88
 
-# Empirical sigma of the calibrated residual, binned by PREDICTED grade (Ghat) --
-# the only thing known at inference time. Derived 2026-06-22, see sigma_table.json.
-SIGMA = {"high": 0.69, "medium": 1.76, "low": 1.52}
-SIGMA_FLOOR = 1.32   # overall residual sigma; floor for sparse bins (low n=7)
+# Display uncertainty band (sigma) by predicted grade. Originally the TAG-calibration
+# residual; after dropping the TAG calibration (stakeholder 2026-06-22) this is a plain
+# +/-1-ish estimate band so the most-likely grade reads clearly (the old wide medium band
+# made 7 and 8 nearly tied, which read as broken). Re-derive against a PSA oracle later.
+SIGMA = {"high": 0.69, "medium": 1.0, "low": 1.2}
+SIGMA_FLOOR = 0.69
 
 # Side weighting and bucket labels (TZ).
 FRONT_W, BACK_W = 0.65, 0.35
@@ -124,6 +126,34 @@ def integer_distribution(g_hat, round_pct=True):
             pcts[top_i] = (pcts[top_i][0], pcts[top_i][1] + drift)
         return [{"grade": g, "prob": p / 100.0} for g, p in pcts]
     return [{"grade": g, "prob": p} for g, p in items]
+
+
+def centering_grade_from_offset(off):
+    """PSA-style centering subgrade from worst-axis % off-from-50. None -> None.
+    55/45 (off 5) -> 10, 60/40 (10) -> 9, 65/35 (15) -> ~8, ... (mirrors the webapp table)."""
+    if off is None:
+        return None
+    for thr, g in [(5, 10), (8, 9), (12, 8), (17, 7), (22, 6), (27, 5), (32, 4), (37, 3), (45, 2)]:
+        if off <= thr:
+            return g
+    return 1
+
+
+def weakest_link(subgrades):
+    """Overall grade the way PSA/BGS actually do it: anchored to the LOWEST subgrade, NOT an
+    average. Stronger other subgrades lift it by at most ~1 point (BGS: overall never >1 above
+    the lowest). So [10,10,10,4] -> ~4.5 (a single bad attribute caps the card), [10,8,8,8.5] -> 8.
+    """
+    vals = [v for v in subgrades if v is not None]
+    if not vals:
+        return None
+    lo = min(vals)
+    others = [v for v in vals if v > lo]
+    if not others:
+        return lo
+    gap = sum(others) / len(others) - lo
+    bump = 1.0 if gap >= 3 else (0.5 if gap >= 1.5 else 0.0)
+    return min(lo + bump, 10.0)
 
 
 def bucket(grade):

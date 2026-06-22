@@ -49,7 +49,8 @@ def wired(tmp_path, monkeypatch):
 
     calls = {"n": 0, "raise": False}
 
-    def fake_grade_card(grader, front_bytes, back_bytes, card_id="card"):
+    def fake_grade_card(grader, front_bytes, back_bytes, card_id="card",
+                        front_centering_off=None, back_centering_off=None):
         calls["n"] += 1
         if calls["raise"]:
             raise RuntimeError("simulated grader failure")

@@ -28,7 +28,7 @@ except ImportError:
     pass  # python-dotenv not installed, rely on system env vars
 
 import uvicorn
-from fastapi import FastAPI, File, Header, HTTPException, Query, UploadFile
+from fastapi import FastAPI, File, Form, Header, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
@@ -1493,6 +1493,8 @@ async def _read_grade_image(upload: "UploadFile", label: str) -> bytes:
 async def grade_card_endpoint(
     file: UploadFile = File(..., description="FRONT image of the card (required)"),
     back_file: UploadFile = File(..., description="BACK image of the card (required)"),
+    front_centering_off: Optional[float] = Form(default=None),
+    back_centering_off: Optional[float] = Form(default=None),
     x_grade_secret: Optional[str] = Header(default=None, alias="X-Grade-Secret"),
     x_user_id: Optional[str] = Header(default=None, alias="X-User-Id"),
     authorization: Optional[str] = Header(default=None),
@@ -1570,7 +1572,9 @@ async def grade_card_endpoint(
 
     t0 = time.time()
     try:
-        result = await run_in_threadpool(grade_card, _claude_grader, front_bytes, back_bytes)
+        result = await run_in_threadpool(
+            grade_card, _claude_grader, front_bytes, back_bytes,
+            "card", front_centering_off, back_centering_off)
     except ValueError as e:
         _release()
         raise HTTPException(status_code=400, detail=str(e))

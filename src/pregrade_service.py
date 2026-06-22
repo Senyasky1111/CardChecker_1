@@ -35,6 +35,11 @@ BLUR_VAR_MIN = 60.0          # Laplacian variance below this => likely out of fo
 SAFETY_FLOOR_ZONE_COUNT = 6
 SAFETY_FLOOR_CAP = 5.0
 
+# PSA/BGS weight the FRONT more than the back: a back flaw lowers the card less than the same
+# flaw on the front. We give the back ~1 grade of leniency when it caps the overall (but a
+# truly bad back, e.g. a 4, still drags the card down — leniency just softens it by one band).
+BACK_LENIENCY = 1.0
+
 
 def blur_score(img: "Image.Image") -> float:
     """Variance of Laplacian — higher = sharper. Cheap focus proxy for the photo-quality gate."""
@@ -103,13 +108,25 @@ def _safety_floor(grade, worn_count: int) -> tuple:
     return grade, False
 
 
-def _side_block(holistic: dict, side: str, grade, worn_zones: list[str]) -> dict | None:
+def _side_grade(holistic: dict, side: str, centering_grade):
+    """Per-side grade via WEAKEST-LINK of its 4 subgrades (PSA/BGS style, not an average).
+    Centering uses the geometry measurement when available, else the grader's centering.
+    Returns (side_grade, centering_used) or (None, None) if the side is absent."""
+    s = holistic.get(side)
+    if not s:
+        return None, None
+    cent = centering_grade if centering_grade is not None else s.get("centering")
+    side_grade = pd.weakest_link([cent, s.get("corners"), s.get("edges"), s.get("surface")])
+    return side_grade, cent
+
+
+def _side_block(holistic: dict, side: str, grade, centering, worn_zones: list[str]) -> dict | None:
     s = holistic.get(side)
     if not s:
         return None
     return {
-        "grade": grade,                      # possibly safety-floored (one-way)
-        "centering": s.get("centering"),
+        "grade": grade,                      # weakest-link of the 4 subgrades (+ one-way safety floor)
+        "centering": centering,              # from geometry measurement (authoritative), not the grader
         "corners": s.get("corners"),
         "edges": s.get("edges"),
         "surface": s.get("surface"),
@@ -117,29 +134,44 @@ def _side_block(holistic: dict, side: str, grade, worn_zones: list[str]) -> dict
     }
 
 
-def assemble(holistic: dict, detections: dict, warnings: list[str]) -> dict:
-    """Build the Decision-Card response contract from grader + detector outputs."""
-    front = holistic.get("front") or {}
+def assemble(holistic: dict, detections: dict, warnings: list[str],
+             front_centering_off=None, back_centering_off=None) -> dict:
+    """Build the Decision-Card response contract from grader + detector outputs.
+
+    Grade aggregation = WEAKEST-LINK (PSA/BGS), not a weighted average: each side's grade is
+    its lowest subgrade (with a small bump if the rest are much higher), and the overall is the
+    weakest side — so one bad attribute caps the card. Centering subgrades come from the
+    geometry measurement (worst-axis offset) when provided by the centering step.
+    """
     back = holistic.get("back")
+    front_cent_g = pd.centering_grade_from_offset(front_centering_off)
+    back_cent_g = pd.centering_grade_from_offset(back_centering_off) if back else None
+
+    front_grade, front_cent = _side_grade(holistic, "front", front_cent_g)
+    back_grade, back_cent = _side_grade(holistic, "back", back_cent_g)
 
     front_worn = _evidence(detections, "front")
     back_worn = _evidence(detections, "back") if back else []
-    front_grade, front_floored = _safety_floor(front.get("grade"), len(front_worn))
-    back_grade, back_floored = (_safety_floor(back.get("grade"), len(back_worn))
+    front_grade, front_floored = _safety_floor(front_grade, len(front_worn))
+    back_grade, back_floored = (_safety_floor(back_grade, len(back_worn))
                                 if back else (None, False))
 
-    if back:
-        overall = pd.build_overall(front_grade=front_grade, back_grade=back_grade)
+    if back and back_grade is not None:
+        # front-primary: the back gets ~1 grade of leniency so a slightly-worse back doesn't
+        # cap a strong front to a tie (PSA/BGS weight the front more). A bad back still drags.
+        back_lenient = min(back_grade + BACK_LENIENCY, 10.0)
+        overall_raw = pd.weakest_link([front_grade, back_lenient])   # weakest side caps (not weighted avg)
     else:
-        overall = pd.build_overall(raw_overall=holistic.get("overall_grade"))
+        overall_raw = front_grade if front_grade is not None else holistic.get("overall_grade")
+    overall = pd.build_overall(raw_overall=overall_raw)
 
     grade_it = overall["bucket"] in ("GEM", "MINT", "NM")   # confident action; card-value gate TODO
     return {
         "is_estimate": True,
         "footer": "Estimated condition from your photos — not an official PSA/BGS/CGC grade.",
         "overall": overall,
-        "front": _side_block(holistic, "front", front_grade, front_worn),
-        "back": _side_block(holistic, "back", back_grade, back_worn),
+        "front": _side_block(holistic, "front", front_grade, front_cent, front_worn),
+        "back": _side_block(holistic, "back", back_grade, back_cent, back_worn),
         "evidence": {"front": (detections or {}).get("front") or {},
                      "back": (detections or {}).get("back") or {}},
         "explanation": holistic.get("explanation", ""),
@@ -150,9 +182,11 @@ def assemble(holistic: dict, detections: dict, warnings: list[str]) -> dict:
     }
 
 
-def grade_card(grader, front_bytes: bytes, back_bytes: bytes, card_id: str = "card") -> dict:
+def grade_card(grader, front_bytes: bytes, back_bytes: bytes, card_id: str = "card",
+               front_centering_off=None, back_centering_off=None) -> dict:
     """Full pipeline. `grader` is a ready ClaudeGrader. Runs the holistic grade and the
-    evidence detector CONCURRENTLY (2 sync API calls). Returns the response contract."""
+    evidence detector CONCURRENTLY (2 sync API calls). The centering offsets (worst-axis %
+    from the interactive centering step) drive the centering subgrade. Returns the contract."""
     with tempfile.TemporaryDirectory(prefix="pregrade_") as tmp:
         assets = build_assets(front_bytes, back_bytes, tmp, card_id)
         warnings = quality_warnings(assets["front_img"], assets["back_img"])
@@ -165,4 +199,6 @@ def grade_card(grader, front_bytes: bytes, back_bytes: bytes, card_id: str = "ca
                               paths["front_full"], paths["back_full"])
             holistic = f_hol.result()
             detections = f_det.result()
-        return assemble(holistic, detections, warnings)
+        return assemble(holistic, detections, warnings,
+                        front_centering_off=front_centering_off,
+                        back_centering_off=back_centering_off)

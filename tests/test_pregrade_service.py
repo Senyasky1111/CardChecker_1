@@ -31,7 +31,7 @@ def test_evidence_filters_to_moderate_plus():
 def test_side_block_uses_detector_not_model_worn_zones():
     # holistic.back.worn_zones is ['TR'] but the detector found TR+BL at MODERATE+
     worn = _evidence(DET, "back")
-    sb = _side_block(HOLISTIC, "back", HOLISTIC["back"]["grade"], worn)
+    sb = _side_block(HOLISTIC, "back", 6.5, HOLISTIC["back"]["centering"], worn)
     assert sorted(sb["worn_zones"]) == ["BL", "TR"]
     assert sb["grade"] == 6.5 and sb["surface"] == 7
 
@@ -57,10 +57,49 @@ def test_assemble_applies_safety_floor_to_high_grade_worn_side():
         "_ms": 1,
     }
     r = assemble(HOLISTIC, det, [])
-    assert r["front"]["grade"] == 5.0          # capped (was 7.5)
+    assert r["front"]["grade"] == 5.0          # capped by the safety floor
     assert r["safety_floor"]["front"] is True
     assert r["safety_floor"]["back"] is False
-    assert r["back"]["grade"] == 6.5           # untouched
+    assert r["back"]["grade"] == 6.0           # weakest-link of back pillars (corners 6), untouched by floor
+
+
+def test_weakest_link_caps_on_worst_subgrade():
+    import src.pregrade_distribution as pd
+    assert pd.weakest_link([10, 10, 10, 4]) == 5.0     # one bad attribute caps it (not 8/avg)
+    assert pd.weakest_link([10, 8, 8, 8.5]) == 8.0     # lowest is 8 -> 8
+    assert pd.weakest_link([9, 9, 9, 9]) == 9.0
+    assert pd.weakest_link([None, 8, 7, 9]) == 7.5     # None ignored; +0.5 bump (others avg 1.5 higher)
+
+
+def test_centering_grade_from_offset_table():
+    import src.pregrade_distribution as pd
+    assert pd.centering_grade_from_offset(4) == 10     # 46/54
+    assert pd.centering_grade_from_offset(8) == 9      # 58/42
+    assert pd.centering_grade_from_offset(15) == 7
+    assert pd.centering_grade_from_offset(None) is None
+
+
+def test_assemble_uses_geometry_centering_and_front_primary():
+    # front pillars strong (8/8/8.5) + measured centering 10; back slightly worse + centering 9
+    hol = {"front": {"corners": 8, "edges": 8, "surface": 8.5},
+           "back": {"corners": 7.5, "edges": 8, "surface": 8}, "overall_grade": 7.8, "_ms": 1}
+    r = assemble(hol, {"front": {}, "back": {}, "_ms": 1}, [],
+                 front_centering_off=4, back_centering_off=8)
+    assert r["front"]["centering"] == 10 and r["back"]["centering"] == 9   # from geometry, not grader
+    assert r["front"]["grade"] == 8.0                                       # weakest-link of front
+    # front-primary: back 7.5 doesn't drag a strong front to a tie -> overall reads 8
+    assert r["overall"]["most_likely"] == 8
+
+
+def test_assemble_front_defect_harsher_than_back_defect():
+    # a corner-4 on the FRONT caps harder than the same on the back
+    front4 = assemble({"front": {"corners": 4, "edges": 10, "surface": 10},
+                       "back": {"corners": 10, "edges": 10, "surface": 10}, "_ms": 1},
+                      {"front": {}, "back": {}, "_ms": 1}, [], front_centering_off=3, back_centering_off=3)
+    back4 = assemble({"front": {"corners": 10, "edges": 10, "surface": 10},
+                      "back": {"corners": 4, "edges": 10, "surface": 10}, "_ms": 1},
+                     {"front": {}, "back": {}, "_ms": 1}, [], front_centering_off=3, back_centering_off=3)
+    assert front4["overall"]["most_likely"] < back4["overall"]["most_likely"]
 
 
 def test_assemble_contract_shape_and_distribution():
