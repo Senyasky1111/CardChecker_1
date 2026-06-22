@@ -191,6 +191,33 @@ def reserve(user_id: str) -> None:
         c.execute("COMMIT")
 
 
+def daily_reserve() -> None:
+    """Atomically bump ONLY the global daily cap (used in Base44 mode, where per-user credits
+    live in Base44 but we still want a server-side cost circuit-breaker). Raises 429 when hit."""
+    daily_cap = _env_int("GRADE_DAILY_CAP", 500)
+    day = _today()
+    with _conn() as c:
+        c.execute("BEGIN IMMEDIATE")
+        row = c.execute("SELECT count FROM daily_usage WHERE day = ?", (day,)).fetchone()
+        if (row[0] if row else 0) >= daily_cap:
+            c.execute("ROLLBACK")
+            raise HTTPException(status_code=429, detail="Daily grading capacity reached, try again tomorrow")
+        c.execute("INSERT INTO daily_usage(day, count) VALUES (?, 1) "
+                  "ON CONFLICT(day) DO UPDATE SET count = count + 1", (day,))
+        c.execute("COMMIT")
+
+
+def daily_refund() -> None:
+    """Roll back a daily-cap reservation when the paid call failed (Base44 mode)."""
+    day = _today()
+    try:
+        with _conn() as c:
+            c.execute("UPDATE daily_usage SET count = MAX(count - 1, 0) WHERE day = ?", (day,))
+            c.commit()
+    except Exception as e:
+        print(f"[grade_gate] daily_refund failed: {type(e).__name__}: {e}")
+
+
 def refund(user_id: str) -> None:
     """Give back a reserved credit when the paid call failed (idempotent per request: the
     endpoint only calls this once, on the failure path). Also rolls back the daily counter."""

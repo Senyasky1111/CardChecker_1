@@ -16,6 +16,7 @@ from starlette.datastructures import Headers, UploadFile
 import src.api as api
 import src.grade_gate as gate
 import src.pregrade_service as svc
+import src.base44_auth as b44
 
 
 def _png() -> bytes:
@@ -29,9 +30,10 @@ def _upload(name: str, data: bytes) -> UploadFile:
                       headers=Headers({"content-type": "image/png"}))
 
 
-def _call(front: UploadFile, back: UploadFile, user="u1"):
+def _call(front: UploadFile, back: UploadFile, user="u1", authorization=None):
     return asyncio.run(api.grade_card_endpoint(
-        file=front, back_file=back, x_grade_secret=None, x_user_id=user))
+        file=front, back_file=back, x_grade_secret=None, x_user_id=user,
+        authorization=authorization))
 
 
 @pytest.fixture
@@ -107,3 +109,60 @@ def test_unconfigured_grader_returns_503(wired, monkeypatch):
     with pytest.raises(HTTPException) as e:
         _call(_upload("f.png", _png()), _upload("b.png", _png()))
     assert e.value.status_code == 503
+
+
+# ---------------------------------------------------------------- Base44 mode (token auth)
+
+@pytest.fixture
+def b44_wired(wired, monkeypatch):
+    """On top of `wired`: mock the Base44 calls so no network happens. Returns counters."""
+    monkeypatch.setenv("GRADE_BETA_ADMIN_ONLY", "1")
+    state = {"charges": 0, "counts": (0, 0), "user": {"email": "a@x.com", "role": "admin",
+                                                      "subscription_tier": "plus"}}
+    monkeypatch.setattr(b44, "verify_user", lambda token: state["user"])
+    monkeypatch.setattr(b44, "grade_counts", lambda token, email: state["counts"])
+
+    def fake_charge(token, ref=None):
+        state["charges"] += 1
+    monkeypatch.setattr(b44, "charge_grade", fake_charge)
+    return state
+
+
+def test_base44_happy_path_charges_after_success(b44_wired, wired):
+    r = _call(_upload("f.png", _png()), _upload("b.png", _png()), authorization="Bearer tok")
+    assert r["overall"]["most_likely"] == 6.0
+    assert wired["n"] == 1               # grader ran
+    assert b44_wired["charges"] == 1     # Base44 charged exactly once, after success
+
+
+def test_base44_over_limit_returns_402_no_spend(b44_wired, wired):
+    b44_wired["counts"] = (50, 50)       # plus month limit is 50 -> over
+    with pytest.raises(HTTPException) as e:
+        _call(_upload("f.png", _png()), _upload("b.png", _png()), authorization="Bearer tok")
+    assert e.value.status_code == 402
+    assert wired["n"] == 0
+    assert b44_wired["charges"] == 0
+
+
+def test_base44_non_admin_blocked_in_beta(b44_wired, wired):
+    b44_wired["user"] = {"email": "u@x.com", "role": "user", "subscription_tier": "plus"}
+    with pytest.raises(HTTPException) as e:
+        _call(_upload("f.png", _png()), _upload("b.png", _png()), authorization="Bearer tok")
+    assert e.value.status_code == 403
+    assert wired["n"] == 0
+
+
+def test_require_base44_rejects_tokenless_call(wired, monkeypatch):
+    monkeypatch.setenv("GRADE_REQUIRE_BASE44", "1")          # prod posture
+    with pytest.raises(HTTPException) as e:
+        _call(_upload("f.png", _png()), _upload("b.png", _png()))  # no Authorization
+    assert e.value.status_code == 401
+    assert wired["n"] == 0
+
+
+def test_base44_failure_does_not_charge(b44_wired, wired):
+    wired["raise"] = True
+    with pytest.raises(HTTPException) as e:
+        _call(_upload("f.png", _png()), _upload("b.png", _png()), authorization="Bearer tok")
+    assert e.value.status_code == 502
+    assert b44_wired["charges"] == 0     # never charged on failure

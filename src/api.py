@@ -1495,6 +1495,7 @@ async def grade_card_endpoint(
     back_file: UploadFile = File(..., description="BACK image of the card (required)"),
     x_grade_secret: Optional[str] = Header(default=None, alias="X-Grade-Secret"),
     x_user_id: Optional[str] = Header(default=None, alias="X-User-Id"),
+    authorization: Optional[str] = Header(default=None),
 ):
     """Pregrading: estimate a card's condition with the validated Claude grader.
 
@@ -1502,71 +1503,106 @@ async def grade_card_endpoint(
     bucket + distribution), per-side pillars, the 'wear we found here' evidence (MODERATE+),
     and a sell-vs-grade decision. Both front AND back are REQUIRED.
 
-    Gated: shared-secret auth (X-Grade-Secret) + per-user grade credits (atomic, 402 when
-    exhausted) + per-user rate limit + idempotency (a retry of the same images returns the
-    cached result without re-charging). This is an estimate from photos, not an official
-    PSA/BGS/CGC grade. ~$0.05/call, ~10-15s (2 Claude vision calls run concurrently).
+    Auth + credits: prefers the Base44 user token (`Authorization: Bearer <jwt>`) — verified
+    with Base44, which yields identity + tier, and the per-tier grade limit is enforced against
+    the Base44 CreditTransaction ledger (the same counter the webapp shows). During beta only
+    admins may grade. Falls back to a local shared-secret + ledger gate (X-Grade-Secret /
+    X-User-Id) for dev/testing without Base44. Per-user rate limit + content-hash idempotency
+    (a retry of the same images replays the cached result, no re-charge) apply in both modes.
+    This is an estimate from photos, not an official PSA/BGS/CGC grade. ~$0.05/call, ~10-15s.
     """
     if _claude_grader is None:
         raise HTTPException(status_code=503,
                             detail="Grading not configured. Set ANTHROPIC_API_KEY.")
 
+    from fastapi.concurrency import run_in_threadpool
+    from src.pregrade_service import grade_card
     from src import grade_gate
+    import json as _json
+    import anthropic
 
-    # 1. Authenticate (blocks anonymous callers from burning the Anthropic budget).
-    user_id = grade_gate.authenticate(x_grade_secret, x_user_id)
-    # 2. Per-user rate limit.
+    # --- Auth: Base44 token (authoritative) takes precedence; else local gate (dev) ---
+    bearer = None
+    if authorization and authorization.lower().startswith("bearer "):
+        bearer = authorization[7:].strip()
+
+    base44_user = None
+    if bearer:
+        from src import base44_auth
+        base44_user = await run_in_threadpool(base44_auth.verify_user, bearer)   # 401/503
+        base44_auth.assert_beta_access(base44_user)                              # 403 in beta
+        user_id = base44_user.get("email") or base44_user.get("id") or "base44"
+    elif os.getenv("GRADE_REQUIRE_BASE44") == "1":
+        # prod posture: a Base44 token is mandatory (no anonymous/local-gate fallback)
+        raise HTTPException(status_code=401, detail="Authentication required")
+    else:
+        user_id = grade_gate.authenticate(x_grade_secret, x_user_id)
+
     grade_gate.enforce_rate_limit(user_id)
 
     # Both sides mandatory (reject single-side).
     front_bytes = await _read_grade_image(file, "Front")
     back_bytes = await _read_grade_image(back_file, "Back")
 
-    # 3. Idempotency — a double-tap / retry of the same images replays the cached result
-    #    without a second paid call or a second credit charge.
+    # Idempotency — a double-tap/retry of the same images replays the cached result (no re-charge).
     key = grade_gate.idem_key(user_id, front_bytes, back_bytes)
     cached = grade_gate.idem_get(key)
     if cached is not None:
         return cached
 
-    # 4. Reserve a credit BEFORE spending money (402 if none, 429 if daily cap hit).
-    grade_gate.reserve(user_id)
+    # Quota check BEFORE spending money.
+    if base44_user is not None:
+        from src import base44_auth
+        wk, mo = await run_in_threadpool(base44_auth.grade_counts, bearer, user_id)   # 503 if unavailable
+        if not base44_auth.within_limit(base44_user.get("subscription_tier"), wk, mo):
+            raise HTTPException(status_code=402, detail="No grade credits remaining")
+        grade_gate.daily_reserve()        # global cost circuit-breaker (429 if hit)
+        reserved_local = False
+    else:
+        grade_gate.reserve(user_id)        # local per-user + daily (402/429), reserve-then-refund
+        reserved_local = True
 
-    from fastapi.concurrency import run_in_threadpool
-    from src.pregrade_service import grade_card
-    import json as _json
-    import anthropic
+    def _release():
+        if reserved_local:
+            grade_gate.refund(user_id)
+        else:
+            grade_gate.daily_refund()
+
     t0 = time.time()
     try:
         result = await run_in_threadpool(grade_card, _claude_grader, front_bytes, back_bytes)
     except ValueError as e:
-        grade_gate.refund(user_id)
+        _release()
         raise HTTPException(status_code=400, detail=str(e))
     except anthropic.RateLimitError:
-        grade_gate.refund(user_id)
+        _release()
         raise HTTPException(status_code=429, detail="Grading is busy, please retry shortly")
     except anthropic.APITimeoutError:
-        grade_gate.refund(user_id)
+        _release()
         raise HTTPException(status_code=504, detail="Grading timed out, please retry")
     except (anthropic.APIConnectionError, anthropic.InternalServerError) as e:
         # upstream unavailable / 'overloaded' (529) / other 5xx — retryable
-        grade_gate.refund(user_id)
+        _release()
         print(f"/grade upstream error: {type(e).__name__}: {e}")
         raise HTTPException(status_code=503, detail="Grading temporarily unavailable, please retry")
     except (_json.JSONDecodeError, KeyError) as e:
         # grader returned empty / non-JSON / missing fields
-        grade_gate.refund(user_id)
+        _release()
         print(f"/grade parse error: {type(e).__name__}: {e}")
         raise HTTPException(status_code=502, detail="Grading returned an unexpected response, please retry")
     except Exception as e:
-        # Anthropic/runtime failure — refund, don't leak internals; log server-side.
-        grade_gate.refund(user_id)
+        # Anthropic/runtime failure — release reservation, don't leak internals; log server-side.
+        _release()
         print(f"/grade failed: {type(e).__name__}: {e}")
         raise HTTPException(status_code=502, detail="Grading failed, please retry")
 
-    # 5. Cache for idempotent retries; structured observability line (no PII beyond user id).
+    # Success: charge the credit (Base44 ledger written AFTER success), cache, observability line.
+    if base44_user is not None:
+        from src import base44_auth
+        await run_in_threadpool(base44_auth.charge_grade, bearer, key[:16])
     grade_gate.idem_put(key, result)
-    print(f"[grade] user={user_id} ml={int((time.time()-t0)*1000)} "
+    print(f"[grade] user={user_id} mode={'base44' if base44_user else 'local'} "
+          f"ml={int((time.time()-t0)*1000)} "
           f"grade={result.get('overall', {}).get('most_likely')} "
           f"bucket={result.get('overall', {}).get('bucket')} "
           f"floor={result.get('safety_floor')} cost~=0.05")
