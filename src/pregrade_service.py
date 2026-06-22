@@ -30,6 +30,11 @@ ImageFile.LOAD_TRUNCATED_IMAGES = True
 EVIDENCE_SEVERITIES = ("MODERATE", "HEAVY")
 BLUR_VAR_MIN = 60.0          # Laplacian variance below this => likely out of focus (needs phone-photo calibration)
 
+# Deterministic one-way safety floor (TZ B2): a side with this many MODERATE+ zones
+# cannot read as a high grade. Only ever LOWERS a side grade, never raises it.
+SAFETY_FLOOR_ZONE_COUNT = 6
+SAFETY_FLOOR_CAP = 5.0
+
 
 def blur_score(img: "Image.Image") -> float:
     """Variance of Laplacian — higher = sharper. Cheap focus proxy for the photo-quality gate."""
@@ -88,17 +93,27 @@ def _evidence(detections: dict, side: str) -> list[str]:
     return [k for k, v in z.items() if v in EVIDENCE_SEVERITIES]
 
 
-def _side_block(holistic: dict, detections: dict, side: str) -> dict | None:
+def _safety_floor(grade, worn_count: int) -> tuple:
+    """One-way cap (TZ B2): a side with >=SAFETY_FLOOR_ZONE_COUNT MODERATE+ zones can't
+    read as high grade. Returns (possibly-capped grade, applied?). Never raises a grade."""
+    if grade is None:
+        return grade, False
+    if worn_count >= SAFETY_FLOOR_ZONE_COUNT and float(grade) > SAFETY_FLOOR_CAP:
+        return SAFETY_FLOOR_CAP, True
+    return grade, False
+
+
+def _side_block(holistic: dict, side: str, grade, worn_zones: list[str]) -> dict | None:
     s = holistic.get(side)
     if not s:
         return None
     return {
-        "grade": s.get("grade"),
+        "grade": grade,                      # possibly safety-floored (one-way)
         "centering": s.get("centering"),
         "corners": s.get("corners"),
         "edges": s.get("edges"),
         "surface": s.get("surface"),
-        "worn_zones": _evidence(detections, side),   # detector evidence (MODERATE+), not the model's self-report
+        "worn_zones": worn_zones,            # detector evidence (MODERATE+), not the model's self-report
     }
 
 
@@ -106,8 +121,15 @@ def assemble(holistic: dict, detections: dict, warnings: list[str]) -> dict:
     """Build the Decision-Card response contract from grader + detector outputs."""
     front = holistic.get("front") or {}
     back = holistic.get("back")
+
+    front_worn = _evidence(detections, "front")
+    back_worn = _evidence(detections, "back") if back else []
+    front_grade, front_floored = _safety_floor(front.get("grade"), len(front_worn))
+    back_grade, back_floored = (_safety_floor(back.get("grade"), len(back_worn))
+                                if back else (None, False))
+
     if back:
-        overall = pd.build_overall(front_grade=front.get("grade"), back_grade=back.get("grade"))
+        overall = pd.build_overall(front_grade=front_grade, back_grade=back_grade)
     else:
         overall = pd.build_overall(raw_overall=holistic.get("overall_grade"))
 
@@ -116,12 +138,13 @@ def assemble(holistic: dict, detections: dict, warnings: list[str]) -> dict:
         "is_estimate": True,
         "footer": "Estimated condition from your photos — not an official PSA/BGS/CGC grade.",
         "overall": overall,
-        "front": _side_block(holistic, detections, "front"),
-        "back": _side_block(holistic, detections, "back"),
+        "front": _side_block(holistic, "front", front_grade, front_worn),
+        "back": _side_block(holistic, "back", back_grade, back_worn),
         "evidence": {"front": (detections or {}).get("front") or {},
                      "back": (detections or {}).get("back") or {}},
         "explanation": holistic.get("explanation", ""),
         "decision": "grade_it" if grade_it else "sell_raw",
+        "safety_floor": {"front": front_floored, "back": back_floored},
         "quality_warnings": warnings,
         "_timing_ms": {"holistic": holistic.get("_ms"), "detect": detections.get("_ms")},
     }

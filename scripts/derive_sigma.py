@@ -13,13 +13,36 @@ from pathlib import Path
 ap = argparse.ArgumentParser()
 ap.add_argument("--dir", default="runs/grade_test_100")
 ap.add_argument("--out", default=None, help="optional JSON dump of the sigma table + distributions")
+ap.add_argument("--mode", choices=["model_overall", "sides_weighted"], default="model_overall",
+                help="raw value to calibrate: 'model_overall' = the model's own overall_grade "
+                     "(legacy, original derivation); 'sides_weighted' = 0.65*front + 0.35*back, "
+                     "the ACTUAL production aggregation in pregrade_distribution.build_overall(). "
+                     "Use sides_weighted so the residual sigma matches what the /grade endpoint renders.")
 A = ap.parse_args()
 R = Path(A.dir)
 
 C = json.load(open(R / "claude_grades.json"))
 GT = json.load(open(R / "_gt_DO_NOT_READ_until_scoring.json"))
-rows = [(C[c]["overall_grade"], float(GT[c]["grade"]), GT[c]["band"], c)
-        for c in C if "overall_grade" in C[c] and c in GT]
+
+FRONT_W, BACK_W = 0.65, 0.35   # must mirror src/pregrade_distribution
+
+
+def _raw(c, r):
+    """Raw overall to calibrate. In sides_weighted mode use the production aggregation
+    (0.65*front + 0.35*back) when both sides exist, else fall back to model overall_grade."""
+    if A.mode == "sides_weighted":
+        f = (r.get("front") or {}).get("grade")
+        b = (r.get("back") or {}).get("grade")
+        if f is not None and b is not None:
+            return FRONT_W * f + BACK_W * b
+    return r.get("overall_grade")
+
+
+rows = [(_raw(c, C[c]), float(GT[c]["grade"]), GT[c]["band"], c)
+        for c in C if _raw(c, C[c]) is not None and c in GT]
+print(f"[mode={A.mode}]  raw = "
+      + ("0.65*front+0.35*back (prod aggregation), model overall fallback for single-side"
+         if A.mode == "sides_weighted" else "model overall_grade (legacy)"))
 
 
 def clip(x, lo=1.0, hi=10.0):

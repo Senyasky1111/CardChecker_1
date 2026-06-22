@@ -114,5 +114,8 @@ def build_overall(raw_overall=None, front_grade=None, back_grade=None):
         "most_likely": g_hat,
         "bucket": b,
         "label": label,
-        "distribution": grade_distribution(g_hat, top_k=4),
+        # top_k=5: at medium σ≈1.8 four half-grade bars only span ~65% of TAG outcomes;
+        # five bars lift rendered-band coverage to ~77% (>=73% promise). Verified honest —
+        # widening σ instead would inflate stated uncertainty (score_empirical_coverage.py).
+        "distribution": grade_distribution(g_hat, top_k=5),
     }

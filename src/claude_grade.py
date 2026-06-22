@@ -225,8 +225,10 @@ def _img_block(path: str) -> dict:
 
 class ClaudeGrader:
     def __init__(self, api_key: Optional[str] = None, model: str = MODEL, thinking: bool = True,
-                 variant: str = "base"):
-        self.client = anthropic.Anthropic(api_key=api_key)  # reads ANTHROPIC_API_KEY if None
+                 variant: str = "base", timeout: float = 90.0):
+        # per-request timeout so a hung call can't pin a /grade threadpool worker forever;
+        # surfaces as anthropic.APITimeoutError -> mapped to HTTP 504 in the endpoint.
+        self.client = anthropic.Anthropic(api_key=api_key, timeout=timeout)  # reads ANTHROPIC_API_KEY if None
         self.model = model
         self.thinking = thinking
         self.system = COUNT_FIRST_PROMPT if variant == "count_first" else SYSTEM_PROMPT

@@ -28,7 +28,7 @@ except ImportError:
     pass  # python-dotenv not installed, rely on system env vars
 
 import uvicorn
-from fastapi import FastAPI, File, HTTPException, Query, UploadFile
+from fastapi import FastAPI, File, Header, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
@@ -92,6 +92,13 @@ async def lifespan(app: FastAPI):
             print(f"Claude grader init failed: {e}")
     else:
         print("ANTHROPIC_API_KEY not set, /grade disabled.")
+
+    # Billing/auth gate ledger for /grade (separate DB; never the catalog cards.db)
+    try:
+        from src.grade_gate import init_db as _init_grade_gate
+        _init_grade_gate()
+    except Exception as e:
+        print(f"grade_gate init failed: {e}")
 
     # Load CLIP recognizer (legacy)
     if INDEX_PATH.exists() and (INDEX_PATH / "cards.faiss").exists():
@@ -1482,21 +1489,12 @@ async def _read_grade_image(upload: "UploadFile", label: str) -> bytes:
     return data
 
 
-def _check_grade_quota(user_id: Optional[str]) -> None:
-    """Subscription + per-grade-limit gate. MUST run BEFORE the paid Claude call.
-
-    TODO(billing): wire to the existing Stripe + Base44 credit system (TZ B4) — atomic
-    compare-and-decrement of the user's remaining grade-credits, 402 when exhausted, and
-    refund on grade failure. Also require an authenticated user here (no anon callers can
-    burn the Anthropic budget). Stub currently allows all calls — DO NOT ship to GA as-is.
-    """
-    return None
-
-
 @app.post("/grade")
 async def grade_card_endpoint(
     file: UploadFile = File(..., description="FRONT image of the card (required)"),
     back_file: UploadFile = File(..., description="BACK image of the card (required)"),
+    x_grade_secret: Optional[str] = Header(default=None, alias="X-Grade-Secret"),
+    x_user_id: Optional[str] = Header(default=None, alias="X-User-Id"),
 ):
     """Pregrading: estimate a card's condition with the validated Claude grader.
 
@@ -1504,44 +1502,74 @@ async def grade_card_endpoint(
     bucket + distribution), per-side pillars, the 'wear we found here' evidence (MODERATE+),
     and a sell-vs-grade decision. Both front AND back are REQUIRED.
 
-    This is an estimate from photos, not an official PSA/BGS/CGC grade. ~$0.05/call,
-    ~10-15s (2 Claude vision calls run concurrently).
+    Gated: shared-secret auth (X-Grade-Secret) + per-user grade credits (atomic, 402 when
+    exhausted) + per-user rate limit + idempotency (a retry of the same images returns the
+    cached result without re-charging). This is an estimate from photos, not an official
+    PSA/BGS/CGC grade. ~$0.05/call, ~10-15s (2 Claude vision calls run concurrently).
     """
     if _claude_grader is None:
         raise HTTPException(status_code=503,
                             detail="Grading not configured. Set ANTHROPIC_API_KEY.")
 
+    from src import grade_gate
+
+    # 1. Authenticate (blocks anonymous callers from burning the Anthropic budget).
+    user_id = grade_gate.authenticate(x_grade_secret, x_user_id)
+    # 2. Per-user rate limit.
+    grade_gate.enforce_rate_limit(user_id)
+
     # Both sides mandatory (reject single-side).
     front_bytes = await _read_grade_image(file, "Front")
     back_bytes = await _read_grade_image(back_file, "Back")
 
-    # Gate BEFORE spending money (stub — see _check_grade_quota TODO).
-    _check_grade_quota(user_id=None)
+    # 3. Idempotency — a double-tap / retry of the same images replays the cached result
+    #    without a second paid call or a second credit charge.
+    key = grade_gate.idem_key(user_id, front_bytes, back_bytes)
+    cached = grade_gate.idem_get(key)
+    if cached is not None:
+        return cached
+
+    # 4. Reserve a credit BEFORE spending money (402 if none, 429 if daily cap hit).
+    grade_gate.reserve(user_id)
 
     from fastapi.concurrency import run_in_threadpool
     from src.pregrade_service import grade_card
     import json as _json
     import anthropic
+    t0 = time.time()
     try:
         result = await run_in_threadpool(grade_card, _claude_grader, front_bytes, back_bytes)
     except ValueError as e:
+        grade_gate.refund(user_id)
         raise HTTPException(status_code=400, detail=str(e))
     except anthropic.RateLimitError:
+        grade_gate.refund(user_id)
         raise HTTPException(status_code=429, detail="Grading is busy, please retry shortly")
     except anthropic.APITimeoutError:
+        grade_gate.refund(user_id)
         raise HTTPException(status_code=504, detail="Grading timed out, please retry")
     except (anthropic.APIConnectionError, anthropic.InternalServerError) as e:
         # upstream unavailable / 'overloaded' (529) / other 5xx — retryable
+        grade_gate.refund(user_id)
         print(f"/grade upstream error: {type(e).__name__}: {e}")
         raise HTTPException(status_code=503, detail="Grading temporarily unavailable, please retry")
     except (_json.JSONDecodeError, KeyError) as e:
         # grader returned empty / non-JSON / missing fields
+        grade_gate.refund(user_id)
         print(f"/grade parse error: {type(e).__name__}: {e}")
         raise HTTPException(status_code=502, detail="Grading returned an unexpected response, please retry")
     except Exception as e:
-        # Anthropic/runtime failure — don't leak internals; log server-side.
+        # Anthropic/runtime failure — refund, don't leak internals; log server-side.
+        grade_gate.refund(user_id)
         print(f"/grade failed: {type(e).__name__}: {e}")
         raise HTTPException(status_code=502, detail="Grading failed, please retry")
+
+    # 5. Cache for idempotent retries; structured observability line (no PII beyond user id).
+    grade_gate.idem_put(key, result)
+    print(f"[grade] user={user_id} ml={int((time.time()-t0)*1000)} "
+          f"grade={result.get('overall', {}).get('most_likely')} "
+          f"bucket={result.get('overall', {}).get('bucket')} "
+          f"floor={result.get('safety_floor')} cost~=0.05")
     return result
 
 

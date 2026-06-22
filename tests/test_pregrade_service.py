@@ -6,7 +6,7 @@ and the sell-vs-grade decision. The actual Claude calls are not exercised here.
 """
 import pytest
 
-from src.pregrade_service import assemble, _evidence, _side_block
+from src.pregrade_service import assemble, _evidence, _side_block, _safety_floor
 
 HOLISTIC = {
     "front": {"grade": 7.5, "centering": 8, "corners": 7, "edges": 7, "surface": 8.5, "worn_zones": ["LEFT"]},
@@ -30,9 +30,37 @@ def test_evidence_filters_to_moderate_plus():
 
 def test_side_block_uses_detector_not_model_worn_zones():
     # holistic.back.worn_zones is ['TR'] but the detector found TR+BL at MODERATE+
-    sb = _side_block(HOLISTIC, DET, "back")
+    worn = _evidence(DET, "back")
+    sb = _side_block(HOLISTIC, "back", HOLISTIC["back"]["grade"], worn)
     assert sorted(sb["worn_zones"]) == ["BL", "TR"]
     assert sb["grade"] == 6.5 and sb["surface"] == 7
+
+
+def test_safety_floor_one_way():
+    # high grade + many heavy zones -> capped at 5.0
+    assert _safety_floor(8.5, 6) == (5.0, True)
+    assert _safety_floor(8.5, 7) == (5.0, True)
+    # below the zone count -> untouched
+    assert _safety_floor(8.5, 5) == (8.5, False)
+    # already low -> never raised
+    assert _safety_floor(4.0, 8) == (4.0, False)
+    # None grade -> passthrough
+    assert _safety_floor(None, 8) == (None, False)
+
+
+def test_assemble_applies_safety_floor_to_high_grade_worn_side():
+    # front graded 7.5 by the model but the detector flags 6 MODERATE+ zones -> floored to 5.0
+    det = {
+        "front": {"TL": "MODERATE", "TR": "MODERATE", "BL": "MODERATE", "BR": "HEAVY",
+                  "TOP": "MODERATE", "BOTTOM": "HEAVY", "LEFT": "CLEAN", "RIGHT": "CLEAN"},
+        "back": {z: "CLEAN" for z in ("TL", "TR", "BL", "BR", "TOP", "BOTTOM", "LEFT", "RIGHT")},
+        "_ms": 1,
+    }
+    r = assemble(HOLISTIC, det, [])
+    assert r["front"]["grade"] == 5.0          # capped (was 7.5)
+    assert r["safety_floor"]["front"] is True
+    assert r["safety_floor"]["back"] is False
+    assert r["back"]["grade"] == 6.5           # untouched
 
 
 def test_assemble_contract_shape_and_distribution():
