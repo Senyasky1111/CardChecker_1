@@ -6,7 +6,7 @@ and the sell-vs-grade decision. The actual Claude calls are not exercised here.
 """
 import pytest
 
-from src.pregrade_service import assemble, _evidence, _side_block, _safety_floor
+from src.pregrade_service import assemble, _evidence, _side_block
 
 HOLISTIC = {
     "front": {"grade": 7.5, "centering": 8, "corners": 7, "edges": 7, "surface": 8.5, "worn_zones": ["LEFT"]},
@@ -36,16 +36,20 @@ def test_side_block_uses_detector_not_model_worn_zones():
     assert sb["grade"] == 6.5 and sb["surface"] == 7
 
 
-def test_safety_floor_one_way():
-    # high grade + many heavy zones -> capped at 5.0
-    assert _safety_floor(8.5, 6) == (5.0, True)
-    assert _safety_floor(8.5, 7) == (5.0, True)
-    # below the zone count -> untouched
-    assert _safety_floor(8.5, 5) == (8.5, False)
-    # already low -> never raised
-    assert _safety_floor(4.0, 8) == (4.0, False)
-    # None grade -> passthrough
-    assert _safety_floor(None, 8) == (None, False)
+def test_whitening_cap_graded_and_one_way():
+    from src.pregrade_service import _whitening_cap, _apply_cap
+    # graded ceilings from MODERATE+ / HEAVY counts
+    assert _whitening_cap(0, 0) is None          # clean -> no ceiling
+    assert _whitening_cap(1, 0) == 9.0           # 1 MODERATE+ -> max 9
+    assert _whitening_cap(2, 0) == 7.0           # 2 -> max 7
+    assert _whitening_cap(4, 0) == 5.0           # 4 -> max 5
+    assert _whitening_cap(1, 1) == 6.0           # 1 HEAVY -> max 6
+    assert _whitening_cap(2, 2) == 5.0           # 2 HEAVY -> max 5
+    # one-way: only lowers, never raises; passthrough on None
+    assert _apply_cap(9.5, 7.0) == (7.0, True)
+    assert _apply_cap(6.0, 7.0) == (6.0, False)
+    assert _apply_cap(8.0, None) == (8.0, False)
+    assert _apply_cap(None, 5.0) == (None, False)
 
 
 def test_assemble_applies_safety_floor_to_high_grade_worn_side():

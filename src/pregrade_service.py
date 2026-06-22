@@ -32,11 +32,6 @@ ImageFile.LOAD_TRUNCATED_IMAGES = True
 EVIDENCE_SEVERITIES = ("MODERATE", "HEAVY")
 BLUR_VAR_MIN = 60.0          # Laplacian variance below this => likely out of focus (needs phone-photo calibration)
 
-# Deterministic one-way safety floor (TZ B2): a side with this many MODERATE+ zones
-# cannot read as a high grade. Only ever LOWERS a side grade, never raises it.
-SAFETY_FLOOR_ZONE_COUNT = 6
-SAFETY_FLOOR_CAP = 5.0
-
 # PSA/BGS weight the FRONT more than the back: a back flaw lowers the card less than the same
 # flaw on the front. We give the back ~1 grade of leniency when it caps the overall (but a
 # truly bad back, e.g. a 4, still drags the card down — leniency just softens it by one band).
@@ -100,13 +95,33 @@ def _evidence(detections: dict, side: str) -> list[str]:
     return [k for k, v in z.items() if v in EVIDENCE_SEVERITIES]
 
 
-def _safety_floor(grade, worn_count: int) -> tuple:
-    """One-way cap (TZ B2): a side with >=SAFETY_FLOOR_ZONE_COUNT MODERATE+ zones can't
-    read as high grade. Returns (possibly-capped grade, applied?). Never raises a grade."""
-    if grade is None:
+def _heavy(detections: dict, side: str) -> list[str]:
+    """Zones flagged HEAVY for one side."""
+    z = (detections or {}).get(side) or {}
+    return [k for k, v in z.items() if v == "HEAVY"]
+
+
+def _whitening_cap(n_mod: int, n_heavy: int):
+    """Graded one-way ceiling from detected whitening — PSA-style 'the weak spots set the
+    ceiling'. n_mod = MODERATE+ zone count, n_heavy = HEAVY zone count (MINOR excluded upstream).
+    Returns a cap grade, or None when nothing forces a ceiling. Only ever LOWERS a side grade."""
+    if n_heavy >= 2 or n_mod >= 4:
+        return 5.0
+    if n_heavy >= 1:
+        return 6.0
+    if n_mod >= 2:
+        return 7.0
+    if n_mod >= 1:
+        return 9.0
+    return None
+
+
+def _apply_cap(grade, cap) -> tuple:
+    """One-way: lower `grade` to `cap` if it's higher. Returns (grade, capped?)."""
+    if grade is None or cap is None:
         return grade, False
-    if worn_count >= SAFETY_FLOOR_ZONE_COUNT and float(grade) > SAFETY_FLOOR_CAP:
-        return SAFETY_FLOOR_CAP, True
+    if float(grade) > cap:
+        return cap, True
     return grade, False
 
 
@@ -154,14 +169,21 @@ def assemble(holistic: dict, detections: dict, warnings: list[str],
 
     front_worn = _evidence(detections, "front")
     back_worn = _evidence(detections, "back") if back else []
-    front_grade, front_floored = _safety_floor(front_grade, len(front_worn))
-    back_grade, back_floored = (_safety_floor(back_grade, len(back_worn))
-                                if back else (None, False))
+    # Detected whitening sets a one-way ceiling per side (always inspect; the cap fires on
+    # detector–holistic disagreement, i.e. a high grade with real MODERATE+ wear).
+    front_grade, front_floored = _apply_cap(
+        front_grade, _whitening_cap(len(front_worn), len(_heavy(detections, "front"))))
+    back_grade, back_floored = (
+        _apply_cap(back_grade, _whitening_cap(len(back_worn), len(_heavy(detections, "back"))))
+        if back else (None, False))
 
     if back and back_grade is not None:
         # front-primary: the back gets ~1 grade of leniency so a slightly-worse back doesn't
-        # cap a strong front to a tie (PSA/BGS weight the front more). A bad back still drags.
-        back_lenient = min(back_grade + BACK_LENIENCY, 10.0)
+        # cap a strong front (PSA/BGS weight the front more). BUT a back with CONFIRMED MODERATE+
+        # whitening gets NO leniency — its damage must drag the grade (the Vaporeon whitened-back
+        # miss: leniency was cancelling real back wear).
+        leniency = 0.0 if back_worn else BACK_LENIENCY
+        back_lenient = min(back_grade + leniency, 10.0)
         overall_raw = pd.weakest_link([front_grade, back_lenient])   # weakest side caps (not weighted avg)
     else:
         overall_raw = front_grade if front_grade is not None else holistic.get("overall_grade")
