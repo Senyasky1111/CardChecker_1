@@ -84,26 +84,27 @@ def pband(gh):
 
 
 # --- run each OOS card through the ACTUAL PRODUCTION rendered distribution ---
-# We do NOT hardcode a top_k. We read how many bars build_overall() emits (the /grade endpoint's
-# own call), then count TAG against grade_distribution() with that SAME top_k on each card's
-# OOS-calibrated Ghat. If prod changes top_k, this number moves with it automatically.
-PROD_TOP_K = len(pd.build_overall(raw_overall=6.0)["distribution"])   # bars production renders
-
-
-def snap(g):
+# The Decision Card renders INTEGER PSA grades (integer_distribution, summing to 100%). So we
+# measure coverage on the INTEGER bins the user actually sees: TAG is rounded to the nearest
+# integer PSA grade, and we check it's among the integer bars production emits.
+def snap_half(g):
     return round(g * 2) / 2
 
 
+def snap_int(g):
+    return int(min(10, max(1, round(g))))
+
+
 def covers_prod(i):
-    """TAG inside the bars production ACTUALLY renders (top_k=PROD_TOP_K), centered on OOS Ghat."""
-    dist = pd.grade_distribution(snap(ghat[i]), top_k=PROD_TOP_K)
-    return any(abs(d["grade"] - snap(rows[i][1])) < 1e-6 for d in dist)
+    """TAG (as nearest integer PSA grade) inside the integer bars production renders."""
+    dist = pd.integer_distribution(snap_half(ghat[i]))
+    return any(d["grade"] == snap_int(rows[i][1]) for d in dist)
 
 
 def covers_full(i):
-    """Sanity: TAG inside the full 19-bar grid (should be ~100%)."""
-    dist = pd.grade_distribution(snap(ghat[i]), top_k=None)
-    return any(abs(d["grade"] - snap(rows[i][1])) < 1e-6 for d in dist)
+    """Sanity: TAG inside the full half-grade grid (should be ~100%)."""
+    dist = pd.grade_distribution(snap_half(ghat[i]), top_k=None)
+    return any(abs(d["grade"] - snap_half(rows[i][1])) < 1e-6 for d in dist)
 
 
 def within1(i):
@@ -123,9 +124,9 @@ print(f"raw overall = sides-weighted 0.65/0.35 for {n_both}/{n} cards; "
       f"model overall_grade fallback for {n - n_both}.")
 print(f"CV calibration coefs (2 folds, fit on sides-weighted raw): "
       + ", ".join(f"a={a:.3f} b={b:+.3f}" for a, b in coefs))
-print(f"production renders {PROD_TOP_K} bars (top_k read from build_overall, not hardcoded).")
+print(f"distribution = INTEGER PSA grades (integer_distribution, what the Decision Card shows).")
 print()
-print(f"COVERAGE in RENDERED band ({PROD_TOP_K} bars): {cov_band:.0%}  ({sum(hit_band)}/{n})   "
+print(f"COVERAGE in RENDERED integer bins: {cov_band:.0%}  ({sum(hit_band)}/{n})   "
       f"[target ~{A.target:.0%}]  {'PASS' if cov_band >= A.target else 'UNDER'}")
 print(f"coverage in full half-grade grid : {cov_full:.0%}  ({sum(hit_full)}/{n})")
 print(f"within +/-1.0 grade of Ghat      : {cov_w1:.0%}  ({sum(hit_w1)}/{n})")
@@ -145,7 +146,7 @@ for band in ("high", "medium", "low"):
 
 print()
 if cov_band >= A.target:
-    print(f">>> PASS: production-rendered band ({PROD_TOP_K} bars) covers TAG {cov_band:.0%} "
+    print(f">>> PASS: production integer bins cover TAG {cov_band:.0%} "
           f">= {A.target:.0%}. The confident-distribution promise holds on cached data.")
 else:
     gap = A.target - cov_band

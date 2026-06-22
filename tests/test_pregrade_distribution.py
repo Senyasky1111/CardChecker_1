@@ -9,7 +9,7 @@ import pytest
 
 from src.pregrade_distribution import (
     calibrate, overall_from_sides, band_for, sigma_for,
-    grade_distribution, bucket, build_overall, SIGMA, SIGMA_FLOOR,
+    grade_distribution, integer_distribution, bucket, build_overall, SIGMA, SIGMA_FLOOR,
 )
 
 
@@ -112,7 +112,41 @@ def test_build_overall_requires_both_sides():
 def test_build_overall_shape_and_confident_voice():
     o = build_overall(front_grade=6.5, back_grade=6.0)
     assert set(o) == {"most_likely", "bucket", "label", "distribution"}
-    assert o["most_likely"] == round(o["most_likely"] * 2) / 2     # on half-grade grid
+    # most_likely is now the INTEGER mode (PSA grades are integers; matches the tallest bar)
+    assert isinstance(o["most_likely"], int)
     assert sum(x["prob"] for x in o["distribution"]) == pytest.approx(1.0, abs=1e-6)
     # confident voice: no apologetic confidence/uncertainty fields leak into the block
     assert "confidence" not in o and "low_confidence" not in o
+
+
+# --- integer-binned distribution (what the Decision Card renders; PSA grades are integers) ---
+@pytest.mark.parametrize("g", [1.0, 3.0, 5.5, 6.4, 8.5, 9.0, 9.7, 10.0])
+def test_integer_distribution_grades_are_integers(g):
+    d = integer_distribution(g)
+    assert all(isinstance(x["grade"], int) for x in d)
+    assert all(1 <= x["grade"] <= 10 for x in d)
+
+
+@pytest.mark.parametrize("g", [1.0, 3.0, 5.5, 6.4, 8.5, 9.0, 9.7, 10.0])
+def test_integer_distribution_sums_to_one(g):
+    d = integer_distribution(g)
+    assert sum(x["prob"] for x in d) == pytest.approx(1.0, abs=1e-9)   # must show 100%, not 52%
+
+
+def test_integer_distribution_no_half_grade_mass_dropped():
+    # the live bug: half-grade bars (8.5, 9.5) silently vanished -> sum 52%. Now folded in.
+    d = integer_distribution(9.0)
+    assert sum(x["prob"] for x in d) == pytest.approx(1.0, abs=1e-9)
+    assert {x["grade"] for x in d} <= set(range(1, 11))
+
+
+def test_integer_distribution_peaks_near_point_estimate():
+    d = integer_distribution(9.0)
+    top = max(d, key=lambda x: x["prob"])
+    assert abs(top["grade"] - 9) <= 1
+
+
+def test_build_overall_most_likely_matches_tallest_bar():
+    o = build_overall(front_grade=9.0, back_grade=8.5)
+    tallest = max(o["distribution"], key=lambda x: x["prob"])["grade"]
+    assert o["most_likely"] == tallest
