@@ -142,22 +142,29 @@ def bucket(grade):
 def build_overall(raw_overall=None, front_grade=None, back_grade=None):
     """Assemble the `overall` block of the /grade response.
 
-    Pass either the model's raw overall, or both side grades (recomputes the
-    weighted overall, then calibrates). Returns most_likely + bucket + label +
-    confident empirical distribution.
+    The headline grade = the model's own weighted overall (front*0.65 + back*0.35),
+    NOT TAG-calibrated. STAKEHOLDER DECISION 2026-06-22: the `1.58*raw-4.88` TAG
+    calibration was dragging the headline below the visible per-side sub-grades (e.g.
+    sides 8/7.5 -> calibrated 7), which read as broken — TAG grades stricter than PSA in
+    the mid range and we display a PSA-style scale. We now show the model's direct read so
+    headline == weighted average of the side grades. (Trade-off: the model's raw scale is
+    a bit compressed at the extremes — true gems read ~9 not 10; the real fix is a PSA
+    recalibration on PSA-graded reference cards. `calibrate()` is kept for that future use.)
+    Returns most_likely + bucket + label + confident empirical distribution.
     """
     if raw_overall is None:
         if front_grade is None or back_grade is None:
             raise ValueError("need raw_overall, or BOTH front_grade and back_grade")
         raw_overall = overall_from_sides(front_grade, back_grade)
-    g_hat = round(calibrate(raw_overall) * 2) / 2     # snap to half-grade grid (continuous est.)
-    # bucket/label stay on the continuous calibrated g_hat (bucket thresholds unchanged).
-    b, label = bucket(g_hat)
+    g_hat = clip(raw_overall)     # show the model's own grade (TAG calibration removed)
     # The rendered distribution is over INTEGER PSA grades and sums to 100% -- the frontend
     # renders integer rows only, so half-grade mass (8.5, 9.5, ...) must be folded into integers
     # or the bars visibly sum to ~52% (live-test bug, 2026-06-22). See integer_distribution().
     dist = integer_distribution(g_hat)
     most_likely = max(dist, key=lambda d: d["prob"])["grade"]   # integer mode = tallest bar
+    # bucket/label derive from the integer headline so the word matches the number
+    # (e.g. 8 -> "Near Mint", not "Excellent 8").
+    b, label = bucket(most_likely)
     return {
         "most_likely": most_likely,
         "bucket": b,
