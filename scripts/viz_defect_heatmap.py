@@ -222,26 +222,27 @@ def run_card(model, cert, side, thr, tile=512, stride=384, batch=8):
     return True
 
 
-def pick_card_certs(n):
-    """val certs that have defect tiles AND exist in tag_raw, with a metadata file."""
-    seen = []
+def pick_card_certs(n, rank="defects"):
+    """Pick val certs present in tag_raw. rank='defects' -> most defect tiles first
+    (cards with real damage = something to find); rank='random' -> shuffled."""
+    cnt = defaultdict(lambda: defaultdict(int))  # cert -> side -> #tiles
     for lp in (TILES / "labels/val").glob("*.txt"):
-        stem = lp.stem  # CERT_side_i
-        parts = stem.rsplit("_", 2)
+        parts = lp.stem.rsplit("_", 2)
         if len(parts) != 3:
             continue
         cert, side, _ = parts
+        cnt[cert][side] += 1
+    cands = []
+    for cert, sides in cnt.items():
+        side = max(sides, key=sides.get)        # side with most defects
+        total = sum(sides.values())
         if (RAW / cert / "images" / f"{side.upper()}_MAIN.jpg").exists():
-            seen.append((cert, side))
-    random.Random(1).shuffle(seen)
-    out, used = [], set()
-    for cert, side in seen:
-        if cert in used:
-            continue
-        used.add(cert); out.append((cert, side))
-        if len(out) >= n:
-            break
-    return out
+            cands.append((cert, side, total))
+    if rank == "defects":
+        cands.sort(key=lambda t: -t[2])
+    else:
+        random.Random(1).shuffle(cands)
+    return [(c, s) for c, s, _ in cands[:n]]
 
 
 def main():

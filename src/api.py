@@ -55,6 +55,7 @@ _matcher: Optional[CardMatcher] = None
 _detector = None  # CardDetector or YOLOCardDetector via get_detector()
 _gemini_identifier: Optional[GeminiIdentifier] = None
 _gemini_grader: Optional[GeminiGrader] = None
+_claude_grader = None  # ClaudeGrader for /grade (pregrading); lazy import to keep anthropic optional
 
 
 # ------------------------------------------------------------------
@@ -63,7 +64,7 @@ _gemini_grader: Optional[GeminiGrader] = None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _recognizer, _matcher, _detector, _gemini_identifier, _gemini_grader
+    global _recognizer, _matcher, _detector, _gemini_identifier, _gemini_grader, _claude_grader
 
     # Initialize card detector (auto: tries YOLO, falls back to OpenCV)
     _detector = get_detector("auto")
@@ -80,6 +81,17 @@ async def lifespan(app: FastAPI):
             print(f"Gemini init failed: {e}")
     else:
         print("GEMINI_API_KEY not set, Gemini endpoints disabled.")
+
+    # Initialize Claude grader for /grade (pregrading) — requires ANTHROPIC_API_KEY (backend env only)
+    if os.environ.get("ANTHROPIC_API_KEY", ""):
+        try:
+            from src.claude_grade import ClaudeGrader
+            _claude_grader = ClaudeGrader()  # reads ANTHROPIC_API_KEY from env
+            print(f"Claude grader ready (model: {_claude_grader.model}).")
+        except Exception as e:
+            print(f"Claude grader init failed: {e}")
+    else:
+        print("ANTHROPIC_API_KEY not set, /grade disabled.")
 
     # Load CLIP recognizer (legacy)
     if INDEX_PATH.exists() and (INDEX_PATH / "cards.faiss").exists():
@@ -102,6 +114,7 @@ async def lifespan(app: FastAPI):
     _detector = None
     _gemini_identifier = None
     _gemini_grader = None
+    _claude_grader = None
 
 
 app = FastAPI(
@@ -1434,6 +1447,88 @@ async def gemini_grade(
         grade_probabilities=result.grade_probabilities,
         image_quality_warning=result.image_quality_warning,
     )
+
+
+# ------------------------------------------------------------------
+# /grade — pregrading (Claude condition grade + confident distribution)
+# TZ: vault/10-Projects/2026-Q2-pregrading-integration.md
+# ------------------------------------------------------------------
+
+MAX_GRADE_IMAGE_BYTES = 15 * 1024 * 1024     # 15 MB per side
+MAX_GRADE_IMAGE_PIXELS = 40_000_000          # 40 MP — decompression-bomb guard
+
+
+async def _read_grade_image(upload: "UploadFile", label: str) -> bytes:
+    """Validate + read one side's image (content-type, size, decodability, pixel cap)."""
+    if not upload or not upload.filename:
+        raise HTTPException(status_code=400, detail=f"{label} image is required")
+    if not upload.content_type or not upload.content_type.startswith("image/"):
+        raise HTTPException(status_code=400, detail=f"{label} file must be an image")
+    data = await upload.read()
+    if not data:
+        raise HTTPException(status_code=400, detail=f"{label} image is empty")
+    if len(data) > MAX_GRADE_IMAGE_BYTES:
+        raise HTTPException(status_code=413, detail=f"{label} image too large (max 15 MB)")
+    # verify it actually decodes and is within the pixel cap (don't trust content_type)
+    import io
+    from PIL import Image as _PILImage
+    try:
+        with _PILImage.open(io.BytesIO(data)) as im:
+            w, h = im.size
+    except Exception:
+        raise HTTPException(status_code=400, detail=f"{label} file is not a readable image")
+    if w * h > MAX_GRADE_IMAGE_PIXELS:
+        raise HTTPException(status_code=413, detail=f"{label} image resolution too high")
+    return data
+
+
+def _check_grade_quota(user_id: Optional[str]) -> None:
+    """Subscription + per-grade-limit gate. MUST run BEFORE the paid Claude call.
+
+    TODO(billing): wire to the existing Stripe + Base44 credit system (TZ B4) — atomic
+    compare-and-decrement of the user's remaining grade-credits, 402 when exhausted, and
+    refund on grade failure. Also require an authenticated user here (no anon callers can
+    burn the Anthropic budget). Stub currently allows all calls — DO NOT ship to GA as-is.
+    """
+    return None
+
+
+@app.post("/grade")
+async def grade_card_endpoint(
+    file: UploadFile = File(..., description="FRONT image of the card (required)"),
+    back_file: UploadFile = File(..., description="BACK image of the card (required)"),
+):
+    """Pregrading: estimate a card's condition with the validated Claude grader.
+
+    Returns a CONFIDENT empirical probability distribution over grades (most-likely grade +
+    bucket + distribution), per-side pillars, the 'wear we found here' evidence (MODERATE+),
+    and a sell-vs-grade decision. Both front AND back are REQUIRED.
+
+    This is an estimate from photos, not an official PSA/BGS/CGC grade. ~$0.05/call,
+    ~10-15s (2 Claude vision calls run concurrently).
+    """
+    if _claude_grader is None:
+        raise HTTPException(status_code=503,
+                            detail="Grading not configured. Set ANTHROPIC_API_KEY.")
+
+    # Both sides mandatory (reject single-side).
+    front_bytes = await _read_grade_image(file, "Front")
+    back_bytes = await _read_grade_image(back_file, "Back")
+
+    # Gate BEFORE spending money (stub — see _check_grade_quota TODO).
+    _check_grade_quota(user_id=None)
+
+    from fastapi.concurrency import run_in_threadpool
+    from src.pregrade_service import grade_card
+    try:
+        result = await run_in_threadpool(grade_card, _claude_grader, front_bytes, back_bytes)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        # Anthropic/runtime failure — don't leak internals; log server-side.
+        print(f"/grade failed: {type(e).__name__}: {e}")
+        raise HTTPException(status_code=502, detail="Grading failed, please retry")
+    return result
 
 
 # Serve the web UI

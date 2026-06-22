@@ -13,6 +13,42 @@ Tags: `decision` `incident` `session` `release` `pivot` `experiment` `milestone`
 
 ---
 
+## [2026-06-22] decision milestone | Pregrading integration TZ LOCKED + ClickUp task + 5-agent review
+
+Locked the TZ `vault/10-Projects/2026-Q2-pregrading-integration.md` for shipping pregrading into the
+live webapp: centering (interactive geometry) + Claude condition grade → Decision Card. Output =
+**confident empirical probability distribution** (most-likely grade + bucket + dist bars), front AND
+back BOTH mandatory, NO "low confidence / see a professional" copy (user-rejected). Ran 5 independent
+expert agents (backend / frontend-UX / ML-correctness / security-billing / deploy-QA) — surfaced 4
+blockers now in the task: (1) roll the leaked ANTHROPIC_API_KEY, (2) reconcile the existing live
+`/gemini/grade` flow (ConditionCheck.jsx, back-optional, banned "low confidence" copy already shipped),
+(3) the per-band σ (0.9/1.1/1.8) are GUESSED MAE values — must be empirically fitted from CV-calibrated
+residuals + coverage-verified, (4) phone-photo gate is a hard pre-GA gate (studio-only validation).
+ClickUp: App development → 86cack80c.
+
+## [2026-06-21] experiment milestone | Claude grader — 7 approaches tested, holistic LOCKED at MAE 0.97
+
+Built + validated the LLM condition grader (Claude Opus 4.8 on whole-card + 8-zone montages,
+front 65/back 35, linear cal grade=clip(1.58·raw−4.88)). 100-card CV: MAE 0.97 vs TAG, r 0.80,
+73% within ±1, ~$0.05/card. Tried rim-crop input, count-first prompt, detect→grade, hybrid,
+deterministic cap, routed LLM-regrade-with-evidence — none beat plain holistic. Ceiling is the
+TARGET (TAG noisy: gem/nm degenerate constants, 86% labels on back, 75% wear photometric), not
+the model (model SEES the wear; proved with a detection prompt). Detector @ MODERATE+ discriminates
+(gem 0.4/low 8.7) but under-detects MODERATE → chain bimodal & fails on medium (TAG 5-8).
+"dangerous overclaim 5→2" was fit-noise (retracted). LOCKED: holistic grade as bucket + detector
+as evidence/safety only (no LLM re-grade). Full doc: [[claude-grader-experiments]]. Open: medium
+band, phone-photo gate, human/PSA oracle.
+
+## [2026-06-19] session decision | Pricing sourcing research — keep aggregator, no scraping core
+
+Surveyed worldwide how card-pricing products source prices/links + audited our code.
+We're already aggregator-consumer (PokeTrace backbone + Pokemon-TCG-API + CardMarket CSV,
+daily refresh; links are generated URLs). 2026: official APIs (TCGplayer/Cardmarket/eBay-sold)
+closed to new devs. DECISION: keep architecture; add a real sold-comps source (recommended
+The Card API) for accuracy + graded-by-grade; affiliate links (eBay EPN + TCGplayer/Impact)
+for revenue; JP scraper (Mercari/Yahoo) deferred. Blocked on user API key for pilot.
+See [[_sessions/2026-06-19-pricing-sourcing-research]] + plans/calm-jumping-rossum.md.
+
 ## [2026-05-31] session | Stripe Customer Portal flow + vault overhaul commit
 
 Subscription plan changes (paid↔paid) now route through Stripe Customer Portal
@@ -321,3 +357,64 @@ Set up project-level MCP integration to query Base44 datastore and Stripe direct
 Recommended key: Stripe restricted key (read-only subscriptions/customers/invoices), or test mode key (sk_test_) for dev. NOT sk_live_ secret.
 
 **Net effect for future sessions**: instead of "show me the screenshot", Claude can directly check `User.subscription_tier`, `subscription.cancel_at_period_end`, `current_period_end`, invoice state — and proactively verify state after deploys.
+
+## [2026-06-19] decision | Brand positioning locked — "stop losing money, decide with data"
+
+Ran `/brand-strategist` (Dunford workflow) to position CardChecker for marketing/GTM. Converged after 3 refinement rounds with user.
+
+**Locked positioning** → canonical doc: [[../_context-packs/brand-positioning]].
+
+- **Core job (JTBD):** "how much is this card really worth (verifiably), what condition, and what do I do — sell raw as NM/EX/Damaged or send to grading?"
+- **Rallying cry:** "Stop losing money on guesswork. Make data-driven decisions on every card."
+- **Villain (StoryBrand):** the black box — apps that give one unverifiable self-computed price.
+- **Two engines:** ① verifiable aggregated price (real TCGplayer/eBay/CardMarket + links, not a made-up number) ② condition/defect assessment (NM/EX/Damaged + centering). Output = the sell-vs-grade decision.
+- **Demoted:** multi-region EN/JP/TW → secondary pillar, do NOT lead with language.
+- **Two-grade rule:** selling-condition (NM/EX/DMG, achievable now) vs grade-potential (range, not precise PSA) — avoids overclaim while grading ML is in R&D.
+
+**New skills created this session** (`.claude/commands/`): `/brand-strategist`, `/ux-designer`, `/growth-marketer`, `/brand-designer` — marketing/brand/design expert personas grounded in named frameworks (Dunford, Neumeier, Byron Sharp, Don Norman, NN/g, Sean Ellis, Reforge, Refactoring UI, etc). Registered in CLAUDE.md.
+
+**Next:** `/ux-designer` on the price-comparison + condition → decision screen (now the product's main screen).
+
+## [2026-06-19] decision | Honesty as brand weapon — don't race on grade accuracy
+
+Competitor evidence (CardMintAI) graded a true ~7 card as a confident PSA 9 while claiming "95% PSA alignment." Confirms our finding: single-photo fine-defect grading is physically impossible (flat light) — competitors overclaim, and our grade is capped the same way.
+
+**Strategic shift locked** (→ [[../_context-packs/brand-positioning]]):
+- Brand villain extended: black box now spans BOTH price AND grade (overclaiming AI graders).
+- Do NOT position on "more accurate AI grade" — unwinnable + physically capped.
+- Lead grading with **centering** (geometry, actually verifiable, MAE ~2.5pp) + honest grade **range + reason**, never a fake precise number.
+- Honesty = the wedge that wins the money-decision segment in a market of overclaimers. This is also the mascot's character (anti-bullshit advisor).
+- Real accuracy only via multi-angle/multi-light capture (v1.5+).
+
+Also this session: explored mascot/brand-character direction (expert-advisor archetype, not cute mascot) + market scan (Pokemon 30th-anniv boom; PSA paused Value tiers, ~14M backlog → grade-or-not pain at peak; AI pre-grade space saturated).
+
+## [2026-06-19] milestone | Mascot locked + full branding session persisted
+
+Completed the marketing/branding session (see [[../_sessions/2026-06-19-branding-session]]). Mascot LOCKED = cute modern "professor penguin" (big loupe + laptop, blue/purple, black casual suit) — embodiment of "decide with data". 6-pose character sheet generated via GPT Image 2 image-to-image (canonical hero job e87b2ecd). Assets in store_listing/mascots/.
+
+**Docs written this session:**
+- [[../_context-packs/brand-positioning]] — positioning (updated: honesty-as-weapon, two-grade rule)
+- [[../_context-packs/brand-mascot]] — mascot canon, poses, regeneration method
+- [[../_context-packs/market-landscape-2026]] — 2026 market scan (PSA backlog, AI-grader overclaim, mascot trend)
+- [[../_context-packs/ux-audit-decision-screen]] — webapp gap analysis (Decision Card is the missing differentiator)
+- [[../_sessions/2026-06-19-branding-session]] — session summary
+
+**Memory pointers:** project_brand_positioning, project_brand_mascot, project_market_landscape, project_ux_decision_audit.
+
+**Open:** name the mascot; flat app-icon; build the Decision Card (UX audit S1+S2).
+
+- 2026-06-19 — Built CardChecker marketing landing (standalone Next.js 16 + Tailwind v4 + Framer Motion) in `landing/`. Pipos mascot (hero parallax + per-section poses), Decision Card mock as the peak, 13 sections from store_listing/landing/landing-spec.md. Installed Claude design/animation skills (greensock/gsap-skills + freshtechbro/claudedesignskills, 30 skills in .claude/skills). Build passes, dev verified. Playbook: store_listing/landing/claude-web-build-playbook.md.
+- 2026-06-20 — Landing v2: switched to LIGHT theme (white bg + blue→purple brand), replaced framed mascots with transparent Pipos cutouts (Higgsfield remove_background ×7) used as side decorations, enriched content (+SourceStrip, +WhatYouGet 6-grid, +Comparison table implicit-villain, +Testimonials placeholder, enriched WhoFor with the-math). Build green. Live: landing/ on next dev :3000.
+- 2026-06-20 — Landing v3: added "See it in action" showcase (Showcase.tsx) — browser-framed mockups faithful to the real Base44 PriceComparison/ConditionResults UI (CM/TCG/eBay badges, price gradient, sub-scores), but grade shown as a RANGE per honesty positioning. Inspired by real webapp components at CardChecker_MVP. Build green.
+- 2026-06-20 — PROVEN: Pipos as interactive 3D. Higgsfield generate_3d (image_to_3d, Meshy) turned the transparent PNG into a textured GLB (8.17MB) — good quality. gltf-transform → 1.42MB webp/no-draco web build. Integrated in landing hero via R3F (@react-three/fiber + drei useGLTF), whole-model cursor look-at (damped rotation toward viewport-normalized pointer), static-PNG fallback, prefers-reduced-motion respected. Build + live puppeteer render verified. Model unrigged (single mesh) → whole-model aim, not head-bone. Files: landing/app/components/Pipos3D.tsx, public/mascot/pipos-web.glb.
+- 2026-06-20 — Landing hero reworked per user feedback: removed 3D Pipos (looked cheap), hero now BIG static Pipos cutout on the right + text left, zero text overlap, two floating product chips. Removed in-section PiposDecor (penguins behind cards read as clutter). All sections reviewed. Build green.
+- 2026-06-20 — Landing repositioned per user: LEAD with AI pre-grading as the differentiator ("one of the most accurate AND most honest"; centering/edges/corners/+light surface). Hero slogan→"Know exactly what your card is worth." Fixed "marketplace" wording (PriceCharting/PokeTrace are price sources, not marketplaces) → "prices you can check, no mystery formula." Added PreGrading section (4 pillars) + Roadmap section (shareable defect maps, multi-angle→99- 2026-06-20 — Landing repositioned per user: LEAD with AI pre-grading as the differentiator ("one of the most accurate AND most honest"; centering/edges/corners/+light surface). Hero slogan -> "Know exactly what your card is worth." Fixed "marketplace" wording (PriceCharting/PokeTrace are price sources, not marketplaces) -> "prices you can check, no mystery formula." Added PreGrading section (4 pillars) + Roadmap section (shareable defect maps, multi-angle to ~99%, deeper surface; all "in development"). Tightened density. 99% kept strictly as roadmap; accuracy claim comparative + honest. Build green.
+- 2026-06-21 — Hero now features the animated Pipos scene video (Seedance 2.0, 5s loop: inspect giant card with loupe -> stand up + wave -> loop). Source 25.8MB 1080p -> web-optimized via ffmpeg to pipos-hero.mp4 (412KB) + pipos-hero.webm (357KB) + pipos-poster.jpg. New HeroMedia.tsx (autoplay/muted/loop/playsinline, prefers-reduced-motion -> poster). Hero relaid out: centered headline + CTAs on top, large framed 16:9 video band below with glow + 2 floating product chips. Final scene frame = m3 (gpt_image_2, neutral card). Build green.
+- 2026-06-21 — Hero fixed per user: reverted to text-LEFT / Pipos-RIGHT. Regenerated the scene on a WHITE background (gpt_image_2 from m3) so it blends into the white page with no frame/block/purple. Chosen w2 -> pipos-scene.jpg (190KB) placed as static hero visual (corners ~254 white = seamless). Video bg-removal had failed; white-bg regen is the clean fix. Pipos-hero.mp4/webm kept for when the white-bg video is generated (swap-in later). Build green.
+- 2026-06-21 — Hero final: zoomed-out white-bg scene so the WHOLE card fits in frame with white air around it (floats as a site element, not a cropped block). Chosen z3 (gpt_image_2) -> pipos-scene.jpg (144KB). Text-left / Pipos-right, seamless white blend (corners 253-254). Build green.
+- 2026-06-21 — Killed the hero "rectangle": the white-bg scene was 253-254, page is 255 -> visible box. Fix: clamp near-white (>=250) to pure 255 on both the static PNG (pipos-scene.png, lossless) and the video (ffmpeg lutrgb). Border now 255 = page white -> scene blends seamlessly, no rectangle. Hero = text-left / Pipos-right, uncropped, video (whitened, muted) + PNG poster. Build green.
+- 2026-06-21 — Integrated user's 1080p white-bg Pipos video (Seedance, job 101bfa76) into hero. Processed: whiten bg (ffmpeg lutrgb >=248->255) + transcode muted mp4 (2.1MB) + webm; HeroMedia (autoplay/muted/loop, poster pipos-scene.png, reduced-motion->poster). Hero container gets a 3% edge feather mask (dual linear-gradient intersect) so residual codec near-white edges dissolve into the page -> no rectangle (verified by compositing a feathered frame on white). Text-left / Pipos-right, uncropped. Build green.
+- 2026-06-21 — Killed the video "snow" (codec grain in flat white): reprocessed with ffmpeg hqdn3d denoise + lutrgb clamp >=243->255. Border now all-255 (0/18000 noisy px), interior white clean. pipos-hero.mp4 836KB. Hero video = clean white, no rectangle, no snow, 3% edge feather. Build green.
+- 2026-06-21 — Hero video upgraded to the 15s storyboard clip (Seedance, job fcd0d3ac: penguin walks the card borders inspecting, waves at ~4s, taps laptop, returns to start pose; no sparkle). Processed: hqdn3d denoise + lutrgb >=243->255 whiten + scale 1280 -> pipos-hero.mp4 1.0MB / webm 2.3MB, muted, border all-255 (clean white, no snow/rectangle). Enlarged on site: grid right col 1.22fr, video max-w-3xl + lg:scale-110. Build green.
+- 2026-06-21 — Landing section pass per user feedback: removed cheap TrustBar; enlarged + restyled hero eyebrow (brand-gradient pill). Moved "How it works" to 3rd, rewrote as "Two clicks. Three answers" (identify+price / condition+defects+grade-prob / weighted grade-risk decision using gem-rate + prices-per-grade + cost/wait). Reframed Problem villain "inflated listing" -> "Overpaying or underselling" (real-world: don't check price, overpay or sell €200 card for €40). Tightened density (section py-11/14, mt-8 grids). Build green.
+- 2026-06-21 — "Super site" pass (5-agent audit -> implementation). Collapsed 16->~12 sections: deleted Worth/Sources/Honesty/fake-Testimonials, merged their content (sources chips -> Showcase caption, honesty line -> PreGrading, trust -> honest TrustStrip). Moved Showcase+Decision up after HowItWorks (show-don't-tell); Decision is now a full-bleed DARK peak band. Killed ALL emoji -> lucide-react line icons. Repointed every primary CTA (Hero/Nav/Showcase/Decision/Pricing) to APP_URL via shared lib/site.ts (was #cta footer-scroll — biggest conversion leak). Stripped "most accurate in the hobby" superlative + 95/99% (positioning-guardrail). Hero subhead now price-led. HowItWorks titles parallel+plain. Comparison -> "Most apps hide the math. We show our work" + "The black box" column. Pricing real anchor (from €4.99). Currency normalized to €. Stronger .glass cards + .kicker pill + .peak-dark. Build green; verified via DOM grep (0 emoji, 14 app links, superlatives gone).
