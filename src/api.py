@@ -1489,12 +1489,46 @@ async def _read_grade_image(upload: "UploadFile", label: str) -> bytes:
     return data
 
 
+def _load_grade_geo(warped_url: Optional[str], outer_json: Optional[str]) -> Optional[dict]:
+    """Load the user-rectified card + confirmed outer box (from the centering step) for precise
+    corner/edge cropping. Returns {"img": PIL, "box": (x0,y0,x1,y1)} or None. Path-traversal-safe:
+    only reads files inside ./static (the centering step's warped images live there)."""
+    if not warped_url or not outer_json:
+        return None
+    import json as _json
+    try:
+        o = _json.loads(outer_json)
+        box = (int(o["left"]), int(o["top"]), int(o["right"]), int(o["bottom"]))
+    except (ValueError, KeyError, TypeError):
+        return None
+    name = os.path.basename(warped_url.split("?")[0])
+    static_dir = Path("./static").resolve()
+    p = (static_dir / name).resolve()
+    if static_dir not in p.parents or not p.exists():
+        return None
+    try:
+        img = Image.open(p).convert("RGB")
+    except Exception:
+        return None
+    W, H = img.size
+    x0, y0, x1, y1 = box
+    x0 = max(0, min(x0, W)); x1 = max(0, min(x1, W))
+    y0 = max(0, min(y0, H)); y1 = max(0, min(y1, H))
+    if x1 - x0 < 10 or y1 - y0 < 10:
+        return None
+    return {"img": img, "box": (x0, y0, x1, y1)}
+
+
 @app.post("/grade")
 async def grade_card_endpoint(
     file: UploadFile = File(..., description="FRONT image of the card (required)"),
     back_file: UploadFile = File(..., description="BACK image of the card (required)"),
     front_centering_off: Optional[float] = Form(default=None),
     back_centering_off: Optional[float] = Form(default=None),
+    front_warped_url: Optional[str] = Form(default=None),
+    back_warped_url: Optional[str] = Form(default=None),
+    front_outer: Optional[str] = Form(default=None),
+    back_outer: Optional[str] = Form(default=None),
     x_grade_secret: Optional[str] = Header(default=None, alias="X-Grade-Secret"),
     x_user_id: Optional[str] = Header(default=None, alias="X-User-Id"),
     authorization: Optional[str] = Header(default=None),
@@ -1572,9 +1606,11 @@ async def grade_card_endpoint(
 
     t0 = time.time()
     try:
+        front_geo = _load_grade_geo(front_warped_url, front_outer)
+        back_geo = _load_grade_geo(back_warped_url, back_outer)
         result = await run_in_threadpool(
             grade_card, _claude_grader, front_bytes, back_bytes,
-            "card", front_centering_off, back_centering_off)
+            "card", front_centering_off, back_centering_off, front_geo, back_geo)
     except ValueError as e:
         _release()
         raise HTTPException(status_code=400, detail=str(e))

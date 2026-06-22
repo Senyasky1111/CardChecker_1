@@ -67,26 +67,42 @@ def _write(tmp: str, name: str, data: bytes) -> str:
     return p
 
 
-def build_assets(front_bytes: bytes, back_bytes: bytes, tmp: str, card_id: str = "card") -> dict:
-    """Decode + crop + build the 8-zone montages and full-card crops for both sides.
-
-    Returns paths {front_montage, back_montage, front_full, back_full} plus the decoded
-    PIL images (for quality checks). Raises ValueError if an image can't be decoded.
-    """
-    fp = _write(tmp, "front.jpg", front_bytes)
-    bp = _write(tmp, "back.jpg", back_bytes)
+def _decode(data: bytes) -> "Image.Image":
     try:
-        front_img = Image.open(fp).convert("RGB")
-        back_img = Image.open(bp).convert("RGB")
+        import io
+        return Image.open(io.BytesIO(data)).convert("RGB")
     except Exception as e:
         raise ValueError(f"could not decode image: {e}")
 
-    fm = save_montage(front_img, card_id, "front", os.path.join(tmp, "front_montage.png"))
-    bm = save_montage(back_img, card_id, "back", os.path.join(tmp, "back_montage.png"))
-    ff = prep_full_card(fp, os.path.join(tmp, "front_full.png"))   # may return None on crop failure
-    bf = prep_full_card(bp, os.path.join(tmp, "back_full.png"))
-    return {"front_montage": fm, "back_montage": bm, "front_full": ff, "back_full": bf,
-            "front_img": front_img, "back_img": back_img}
+
+def build_assets(front_bytes: bytes, back_bytes: bytes, tmp: str, card_id: str = "card",
+                 front_geo: dict | None = None, back_geo: dict | None = None) -> dict:
+    """Decode + crop + build the 8-zone montages and full-card crops for both sides.
+
+    Per side, when `*_geo = {"img": rectified-card PIL, "box": (x0,y0,x1,y1)}` is provided (the
+    USER-confirmed centering geometry), the montage / crops / full-card are cut from that
+    rectified card + box — precise, and robust on phone photos (where background-segmentation
+    `card_box` + the disk-path `prep_full_card` break). Otherwise falls back to raw bytes +
+    `card_box` + `prep_full_card`. Returns montage/full paths + the source img + box per side.
+    """
+    out = {}
+    for side, raw, geo in (("front", front_bytes, front_geo), ("back", back_bytes, back_geo)):
+        montage_p = os.path.join(tmp, f"{side}_montage.png")
+        full_p = os.path.join(tmp, f"{side}_full.png")
+        if geo and geo.get("img") is not None:
+            img, box = geo["img"], geo.get("box")
+            save_montage(img, card_id, side, montage_p, box=box)
+            (img.crop(box) if box else img).save(full_p)            # full card = warped cropped to the edges
+            out[side] = {"img": img, "box": box, "montage": montage_p, "full": full_p}
+        else:
+            img = _decode(raw)
+            save_montage(img, card_id, side, montage_p)
+            full = prep_full_card(_write(tmp, f"{side}.jpg", raw), full_p)   # may be None on crop failure
+            out[side] = {"img": img, "box": None, "montage": montage_p, "full": full}
+    return {"front_montage": out["front"]["montage"], "back_montage": out["back"]["montage"],
+            "front_full": out["front"]["full"], "back_full": out["back"]["full"],
+            "front_img": out["front"]["img"], "back_img": out["back"]["img"],
+            "front_box": out["front"]["box"], "back_box": out["back"]["box"]}
 
 
 def _evidence(detections: dict, side: str) -> list[str]:
@@ -216,18 +232,19 @@ ZONE_LABELS = {"TL": "Top-left corner", "TR": "Top-right corner", "BL": "Bottom-
 ZONE_KIND = {z: ("corner" if z in ("TL", "TR", "BL", "BR") else "edge") for z in CROP_ZONES}
 
 
-def _build_crops(front_img, back_img, detections, front_bytes, back_bytes) -> dict:
+def _build_crops(front_img, back_img, front_box, back_box, detections, front_bytes, back_bytes) -> dict:
     """Save the per-zone crops (4 corners + 4 edges per side) and return their URLs + severity,
     so the report SHOWS the actual corner/edge close-ups the grader analyzed (decide-with-data).
-    Crops are content-hashed (re-grading the same card reuses files)."""
+    Uses the same user-confirmed box as the montage/detector. Content-hashed (re-grade reuses)."""
     os.makedirs(STATIC_CROPS_DIR, exist_ok=True)
     out = {}
-    for side, img, sbytes in (("front", front_img, front_bytes), ("back", back_img, back_bytes)):
+    for side, img, box, sbytes in (("front", front_img, front_box, front_bytes),
+                                   ("back", back_img, back_box, back_bytes)):
         if img is None:
             out[side] = []
             continue
         h = hashlib.sha256(sbytes).hexdigest()[:16]
-        crops = zone_crops(img)
+        crops = zone_crops(img, box=box)
         sev = (detections or {}).get(side) or {}
         items = []
         for z in CROP_ZONES:
@@ -249,12 +266,15 @@ def _build_crops(front_img, back_img, detections, front_bytes, back_bytes) -> di
 
 
 def grade_card(grader, front_bytes: bytes, back_bytes: bytes, card_id: str = "card",
-               front_centering_off=None, back_centering_off=None) -> dict:
+               front_centering_off=None, back_centering_off=None,
+               front_geo: dict | None = None, back_geo: dict | None = None) -> dict:
     """Full pipeline. `grader` is a ready ClaudeGrader. Runs the holistic grade and the
     evidence detector CONCURRENTLY (2 sync API calls). The centering offsets (worst-axis %
-    from the interactive centering step) drive the centering subgrade. Returns the contract."""
+    from the interactive centering step) drive the centering subgrade; `*_geo` (rectified card
+    + user-confirmed box) drive precise corner/edge cropping when available. Returns the contract."""
     with tempfile.TemporaryDirectory(prefix="pregrade_") as tmp:
-        assets = build_assets(front_bytes, back_bytes, tmp, card_id)
+        assets = build_assets(front_bytes, back_bytes, tmp, card_id,
+                              front_geo=front_geo, back_geo=back_geo)
         warnings = quality_warnings(assets["front_img"], assets["back_img"])
         paths = dict(front_montage=assets["front_montage"], back_montage=assets["back_montage"],
                      front_full=assets["front_full"], back_full=assets["back_full"])
@@ -270,5 +290,6 @@ def grade_card(grader, front_bytes: bytes, back_bytes: bytes, card_id: str = "ca
                           back_centering_off=back_centering_off)
         # the 8 corner + 8 edge close-ups (4 corners + 4 edges per side) for the report
         result["crops"] = _build_crops(assets["front_img"], assets["back_img"],
+                                       assets["front_box"], assets["back_box"],
                                        detections, front_bytes, back_bytes)
         return result

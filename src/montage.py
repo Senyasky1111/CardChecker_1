@@ -54,13 +54,17 @@ def _tile(a, sz, label):
     return np.vstack([bar, a])
 
 
-def _extract_zones(img, rim=False):
+def _extract_zones(img, rim=False, box=None):
     """Cut the 8 analyzed regions (4 corners + 4 edges) from one side. Single source of the
-    crop geometry — used by both make_montage (grader input) and zone_crops (report display),
-    so the report crops are EXACTLY what the grader saw. Returns (corners, edges, sz)."""
+    crop geometry — used by make_montage (grader+detector input) and zone_crops (report display),
+    so the report crops are EXACTLY what the grader saw. Returns (corners, edges, sz).
+
+    `box` = (x0,y0,x1,y1) card edges. When given (the USER-confirmed outer rect from the
+    interactive centering step, on the rectified card) we use it instead of background
+    segmentation (`card_box`) — precise on phone photos, where card_box breaks."""
     rgb = np.asarray(img)
     H, W = rgb.shape[:2]
-    bx0, by0, bx1, by1 = card_box(img)
+    bx0, by0, bx1, by1 = box if box is not None else card_box(img)
     bw, bh = bx1 - bx0, by1 - by0
     mg = int(0.02 * min(bw, bh))                    # outward margin so the cut edge is always in frame
     bx0 = max(0, bx0 - mg); by0 = max(0, by0 - mg)
@@ -82,23 +86,23 @@ def _extract_zones(img, rim=False):
     return corners, edges, sz
 
 
-def zone_crops(img, rim=False):
+def zone_crops(img, rim=False, box=None):
     """Return the 8 analyzed zone crops as {label: RGB np.array} for the report — the same
     corners/edges the grader sees. Edge strips are rotated to a viewable horizontal orientation."""
-    corners, edges, _ = _extract_zones(img, rim=rim)
+    corners, edges, _ = _extract_zones(img, rim=rim, box=box)
     out = dict(corners)
     for k, v in edges.items():
         out[k] = np.rot90(v) if k in ("LEFT", "RIGHT") else v
     return out
 
 
-def make_montage(img, cardid, side, rim=False):
+def make_montage(img, cardid, side, rim=False, box=None):
     """Build the labeled 8-zone montage (numpy RGB array) for one side of a card.
 
     img: PIL RGB image. side: "front"/"back". rim=True is the EXP-1 tight-crop variant
-    (worse — kept only for reproducibility; production uses rim=False).
-    """
-    corners, edges, sz = _extract_zones(img, rim=rim)
+    (worse — kept only for reproducibility; production uses rim=False). box = user-confirmed
+    card edges (see _extract_zones)."""
+    corners, edges, sz = _extract_zones(img, rim=rim, box=box)
     crow = np.hstack([_tile(corners[k], sz, f"{k} CORNER") for k in ("TL", "TR", "BL", "BR")])
 
     def estrip(a, name):
@@ -116,7 +120,7 @@ def make_montage(img, cardid, side, rim=False):
     return np.vstack([title, crow, np.full((6, crow.shape[1], 3), 255, np.uint8), erow])
 
 
-def save_montage(img, cardid, side, out_path, rim=False):
+def save_montage(img, cardid, side, out_path, rim=False, box=None):
     """Build the montage and write it to out_path (PNG). Returns out_path."""
-    Image.fromarray(make_montage(img, cardid, side, rim=rim)).save(out_path)
+    Image.fromarray(make_montage(img, cardid, side, rim=rim, box=box)).save(out_path)
     return out_path
