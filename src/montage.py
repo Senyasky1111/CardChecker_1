@@ -54,12 +54,10 @@ def _tile(a, sz, label):
     return np.vstack([bar, a])
 
 
-def make_montage(img, cardid, side, rim=False):
-    """Build the labeled 8-zone montage (numpy RGB array) for one side of a card.
-
-    img: PIL RGB image. side: "front"/"back". rim=True is the EXP-1 tight-crop variant
-    (worse — kept only for reproducibility; production uses rim=False).
-    """
+def _extract_zones(img, rim=False):
+    """Cut the 8 analyzed regions (4 corners + 4 edges) from one side. Single source of the
+    crop geometry — used by both make_montage (grader input) and zone_crops (report display),
+    so the report crops are EXACTLY what the grader saw. Returns (corners, edges, sz)."""
     rgb = np.asarray(img)
     H, W = rgb.shape[:2]
     bx0, by0, bx1, by1 = card_box(img)
@@ -81,6 +79,26 @@ def make_montage(img, cardid, side, rim=False):
                "BL": cr(bx0, by1 - cs, bx0 + cs, by1), "BR": cr(bx1 - cs, by1 - cs, bx1, by1)}
     edges = {"TOP": cr(bx0, by0, bx1, by0 + strip), "BOTTOM": cr(bx0, by1 - strip, bx1, by1),
              "LEFT": cr(bx0, by0, bx0 + strip, by1), "RIGHT": cr(bx1 - strip, by0, bx1, by1)}
+    return corners, edges, sz
+
+
+def zone_crops(img, rim=False):
+    """Return the 8 analyzed zone crops as {label: RGB np.array} for the report — the same
+    corners/edges the grader sees. Edge strips are rotated to a viewable horizontal orientation."""
+    corners, edges, _ = _extract_zones(img, rim=rim)
+    out = dict(corners)
+    for k, v in edges.items():
+        out[k] = np.rot90(v) if k in ("LEFT", "RIGHT") else v
+    return out
+
+
+def make_montage(img, cardid, side, rim=False):
+    """Build the labeled 8-zone montage (numpy RGB array) for one side of a card.
+
+    img: PIL RGB image. side: "front"/"back". rim=True is the EXP-1 tight-crop variant
+    (worse — kept only for reproducibility; production uses rim=False).
+    """
+    corners, edges, sz = _extract_zones(img, rim=rim)
     crow = np.hstack([_tile(corners[k], sz, f"{k} CORNER") for k in ("TL", "TR", "BL", "BR")])
 
     def estrip(a, name):

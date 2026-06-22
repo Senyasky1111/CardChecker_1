@@ -19,7 +19,9 @@ import numpy as np
 import cv2
 from PIL import Image, ImageFile
 
-from src.montage import save_montage
+import hashlib
+
+from src.montage import save_montage, zone_crops
 from src.claude_grade import prep_full_card
 from src import pregrade_distribution as pd
 
@@ -182,6 +184,48 @@ def assemble(holistic: dict, detections: dict, warnings: list[str],
     }
 
 
+# Report crops = the 8 analyzed regions per side (4 corners + 4 edges). Surface is NOT a crop
+# zone (graded holistically). Across front+back the user sees 8 corners + 8 edges.
+STATIC_CROPS_DIR = "static/pregrade_crops"
+CROP_ZONES = ["TL", "TR", "BL", "BR", "TOP", "BOTTOM", "LEFT", "RIGHT"]
+ZONE_LABELS = {"TL": "Top-left corner", "TR": "Top-right corner", "BL": "Bottom-left corner",
+               "BR": "Bottom-right corner", "TOP": "Top edge", "BOTTOM": "Bottom edge",
+               "LEFT": "Left edge", "RIGHT": "Right edge"}
+ZONE_KIND = {z: ("corner" if z in ("TL", "TR", "BL", "BR") else "edge") for z in CROP_ZONES}
+
+
+def _build_crops(front_img, back_img, detections, front_bytes, back_bytes) -> dict:
+    """Save the per-zone crops (4 corners + 4 edges per side) and return their URLs + severity,
+    so the report SHOWS the actual corner/edge close-ups the grader analyzed (decide-with-data).
+    Crops are content-hashed (re-grading the same card reuses files)."""
+    os.makedirs(STATIC_CROPS_DIR, exist_ok=True)
+    out = {}
+    for side, img, sbytes in (("front", front_img, front_bytes), ("back", back_img, back_bytes)):
+        if img is None:
+            out[side] = []
+            continue
+        h = hashlib.sha256(sbytes).hexdigest()[:16]
+        crops = zone_crops(img)
+        sev = (detections or {}).get(side) or {}
+        items = []
+        for z in CROP_ZONES:
+            arr = crops.get(z)
+            if arr is None:
+                continue
+            fname = f"{h}_{side}_{z}.png"
+            path = os.path.join(STATIC_CROPS_DIR, fname)
+            if not os.path.exists(path):
+                try:
+                    Image.fromarray(arr).save(path)
+                except Exception as e:
+                    print(f"[crops] save failed {fname}: {type(e).__name__}: {e}")
+                    continue
+            items.append({"zone": z, "label": ZONE_LABELS[z], "kind": ZONE_KIND[z],
+                          "severity": sev.get(z, "CLEAN"), "url": f"/{path.replace(os.sep, '/')}"})
+        out[side] = items
+    return out
+
+
 def grade_card(grader, front_bytes: bytes, back_bytes: bytes, card_id: str = "card",
                front_centering_off=None, back_centering_off=None) -> dict:
     """Full pipeline. `grader` is a ready ClaudeGrader. Runs the holistic grade and the
@@ -199,6 +243,10 @@ def grade_card(grader, front_bytes: bytes, back_bytes: bytes, card_id: str = "ca
                               paths["front_full"], paths["back_full"])
             holistic = f_hol.result()
             detections = f_det.result()
-        return assemble(holistic, detections, warnings,
-                        front_centering_off=front_centering_off,
-                        back_centering_off=back_centering_off)
+        result = assemble(holistic, detections, warnings,
+                          front_centering_off=front_centering_off,
+                          back_centering_off=back_centering_off)
+        # the 8 corner + 8 edge close-ups (4 corners + 4 edges per side) for the report
+        result["crops"] = _build_crops(assets["front_img"], assets["back_img"],
+                                       detections, front_bytes, back_bytes)
+        return result

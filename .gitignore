@@ -94,3 +94,4 @@ tests/corner_debug/
 tests/warp_compare/
 tests/warp_quality/
 tests/yolo_vs_opencv/
+static/pregrade_crops/
