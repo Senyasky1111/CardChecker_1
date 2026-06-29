@@ -31,9 +31,19 @@ TL;DR: Shipped pregrading (Quick Pregrading) to closed beta, iterated heavily on
 
 **Billing verified (E):** path wired (createSubscriptionCheckout → Stripe → verifySubscription → tier). Stripe price-ids LIVE + match UI: Plus €6.99/mo, Pro €14.99/mo. Only a real test-purchase left to 100%-confirm round-trip.
 
-## REMAINING for public launch
-- **D1/D2 (grade accuracy) — balance topped up 2026-06-30, RUN NEXT.** Golden regression of the NEW weakest-link logic on `runs/grade_test_100` (paid ~$5) — currently only validated on a 10-card faithful TAG test (`scripts/test_beta_tag.py`, MAE 1.00; weaknesses: lenient on heavily-played + front detector over-flags on holo). Scale to 100 + compare 2–3 detector severity-threshold variants. This decides whether Quick Pregrading opens beyond admins.
-- **F:** privacy/terms (verify real, not placeholders — needed for store), final QA across all screens, then publish via Base44 (Base44 packages the webapp for Play/App Store automatically).
+## D1/D2 DONE 2026-06-30 — heavy-driven cap adopted + deployed
+Golden regression on 92/95 usable cards (`scripts/grade_regression_95.py`, paid ~$5, results cached
+in `runs/grade_regression_95_cache.json` → re-score is free via `--score`). Swept 5 whitening-cap
+variants OFFLINE (one paid pass, free re-aggregation). **New logic: MAE 1.21, within ±2 = 85%.**
+Reliable where money is (NM MAE 0.37, Gem 1.11); over-generous on played cards (reads 4.5–5.5 as 7–8 —
+holistic-grader leniency, not cap-fixable). **Adopted `heavy_plus4` cap** (`src/pregrade_service._whitening_cap`,
+committed 7e35e7e): single 1–3 MODERATE zones no longer cap (killed the holo/foil-front over-flag that
+dragged good cards down — the Charizard/Vaporeon complaint); 4+ MODERATE→7 or any HEAVY→6/5 still cap.
+Wins: gem under-cap 5→3, NM MAE 0.63→0.37, **decision accuracy 77%→80%**. 88 backend tests green.
+**DEPLOYED to prod beta** (`scripts/deploy_prod.sh`: build OK, health 200, grader ready). Rollback tag captured.
+**LAUNCH VERDICT: wider invited beta YES, full public launch NOT yet** — residual ~5% false "grade it" on
+played cards (costly direction) + only validated on TAG studio scans, NOT real phone photos (≥30-photo gate open).
+- **F1 DONE:** privacy/terms verified REAL + launch-ready (Terms §6 = proper grade-estimate disclaimer; Privacy §4 updated to disclose Anthropic Claude as a third-party AI processor — pushed to webapp main b99f0b9). **F2 partial:** webapp build green (EXIT 0), banned copy confirmed gone (only code-comments reference it), Pregrade/Privacy/Terms routes registered, Pregrade admin-gated. REMAINING (human): manual visual QA across screens + click **Publish on Base44**.
 - **Validation gate:** ≥30 real phone photos before opening to non-admins.
 - **Optional/deferred:** CORS lock /grade to webapp origin (token already protects budget); recall tuning; CardMarket CSV refresh for ~26 EN CSV-only cards; prices_external retention.
 
