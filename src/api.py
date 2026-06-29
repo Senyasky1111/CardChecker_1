@@ -929,7 +929,12 @@ async def get_card_prices(tcgdex_id: str):
     if not card:
         raise HTTPException(status_code=404, detail="Card not found")
 
-    # Get all price rows
+    # Get all price rows.
+    # Multiple sources can supply the same marketplace+condition+country. The daily
+    # 'poketrace' run keeps CardMarket fresh; the manual 'cardmarket_csv' import is a
+    # one-off that goes stale. Order so the FRESHEST snapshot wins, and on a snapshot
+    # tie prefer the auto-updated source ('poketrace') over the stale manual CSV.
+    # Each (marketplace/condition/country) key is then filled first-wins below.
     prices = conn.execute("""
         SELECT source, marketplace, condition, country, currency,
                price_avg, price_low, price_high, price_trend,
@@ -937,7 +942,8 @@ async def get_card_prices(tcgdex_id: str):
                snapshot_date, updated_at
         FROM prices_external
         WHERE tcgdex_id = ?
-        ORDER BY snapshot_date DESC
+        ORDER BY snapshot_date DESC,
+                 CASE WHEN source = 'cardmarket_csv' THEN 1 ELSE 0 END ASC
     """, (tcgdex_id,)).fetchall()
 
     # Organize by marketplace
@@ -969,20 +975,24 @@ async def get_card_prices(tcgdex_id: str):
         # Remove None values
         price_data = {k: v for k, v in price_data.items() if v is not None}
 
+        # Rows are ordered freshest-first (snapshot_date DESC, auto-source before stale
+        # CSV on ties), so the FIRST row seen for a given key is the one to keep. Use
+        # setdefault so an older duplicate never clobbers the fresher value.
+
         # Graded conditions
         if cond.startswith(("PSA_", "BGS_", "CGC_", "SGC_", "ACE_", "TAG_")):
-            graded[cond.lower()] = price_data
+            graded.setdefault(cond.lower(), price_data)
             continue
 
         if mp in ("cardmarket", "cardmarket_unsold"):
             key = f"{cond}_{country}".lower() if country != "ALL" else cond.lower()
-            cardmarket[key] = price_data
+            cardmarket.setdefault(key, price_data)
 
         elif mp == "tcgplayer":
-            tcgplayer[cond.lower()] = price_data
+            tcgplayer.setdefault(cond.lower(), price_data)
 
         elif mp == "ebay":
-            ebay[cond.lower()] = price_data
+            ebay.setdefault(cond.lower(), price_data)
 
     # Build links
     links = {}

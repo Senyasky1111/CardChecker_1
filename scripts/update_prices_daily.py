@@ -37,9 +37,15 @@ from src.db import ensure_schema
 TODAY = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 NOW = datetime.now(timezone.utc).isoformat()
 
-# Safety limits (hard stop if exceeded)
-PT_LIMIT = 9500       # PokeTrace: 10K/day, leave 500 buffer
-PA_LIMIT = 3000       # Pokemon-API: 15K/day via RapidAPI
+# Safety limits (hard stop if exceeded). Override via env to cover ALL cards
+# across multiple runs or with a higher daily quota:
+#   PT_LIMIT=20000 PA_LIMIT=5000 python scripts/update_prices_daily.py
+# Default PokeTrace cap of 9500 fits a 10K/day plan with a 500 buffer; with
+# ~43K CM cards (EU) + ~18K tcgplayer cards (US) batched at 20/req the full
+# sweep needs ~3K requests, so a single run already covers everything — but
+# raise PT_LIMIT if the plan quota is lower and you want explicit headroom.
+PT_LIMIT = int(os.getenv("PT_LIMIT", "9500"))   # PokeTrace daily call cap
+PA_LIMIT = int(os.getenv("PA_LIMIT", "3000"))   # Pokemon-API daily call cap
 
 # -- PokeTrace session --
 pt_session = requests.Session()
@@ -128,7 +134,7 @@ def update_poketrace_bulk(conn, dry_run=False):
     """).fetchall()
 
     batch_size = 20
-    est_requests = (len(all_cards) + batch_size - 1) // batch_size * 2  # EU + US
+    est_requests = (len(all_cards) + batch_size - 1) // batch_size  # EU only (US is a separate step)
     print(f"  Cards: {len(all_cards)}")
     print(f"  Estimated requests: ~{est_requests}")
 
@@ -186,30 +192,11 @@ def update_poketrace_bulk(conn, dry_run=False):
                     WHERE tcgdex_id = ?""", (top_eur, has_graded, NOW, tcgdex_id))
                 matched += 1
 
-        # US market
-        data_us = pt_get("/cards", {"cardmarket_ids": batch_str, "market": "US"})
-        if data_us and "data" in data_us:
-            for card in data_us["data"]:
-                cm_id = str(card.get("refs", {}).get("cardmarketId", ""))
-                tcgdex_id = cm_to_tcg.get(cm_id)
-                if not tcgdex_id:
-                    continue
-                refs = card.get("refs", {})
-                tcg_id = refs.get("tcgplayerId")
-                if tcg_id:
-                    conn.execute("UPDATE cards SET tcgplayer_id = ? WHERE tcgdex_id = ?", (tcg_id, tcgdex_id))
-                prices = card.get("prices") or {}
-                for marketplace, tiers in prices.items():
-                    if not isinstance(tiers, dict):
-                        continue
-                    for condition, tier in tiers.items():
-                        if not isinstance(tier, dict):
-                            continue
-                        _save_price(conn, tcgdex_id, "poketrace", marketplace, condition, "ALL", "USD", tier)
-                        price_rows += 1
-                top_usd = _best_price(prices, "tcgplayer") or _best_price(prices, "ebay")
-                if top_usd:
-                    conn.execute("UPDATE cards SET top_price_usd = ? WHERE tcgdex_id = ?", (top_usd, tcgdex_id))
+        # NOTE: US prices are NOT fetched here. PokeTrace's /cards?market=US
+        # endpoint is keyed by tcgplayer_ids, NOT cardmarket_ids — querying it
+        # with cardmarket_ids returns an empty data array (verified against
+        # base1-1 / cm 273696). US/TCGplayer+eBay ingestion lives in
+        # update_poketrace_us() below, driven by cards.tcgplayer_id.
 
         batch_num = i // batch_size + 1
         total_batches = (len(cm_ids) + batch_size - 1) // batch_size
@@ -219,6 +206,97 @@ def update_poketrace_bulk(conn, dry_run=False):
 
     conn.commit()
     print(f"  Done: matched {matched}/{len(all_cards)} | price rows: {price_rows} | API calls: {pt_calls}")
+
+
+# ── Step 1b: PokeTrace US — ALL cards with tcgplayer_id ──────────────
+
+def update_poketrace_us(conn, dry_run=False, only_tcgplayer_ids=None):
+    """Refresh US (TCGplayer + eBay) prices for ALL cards with a tcgplayer_id.
+
+    PokeTrace's US market is keyed by tcgplayer_ids (NOT cardmarket_ids). The
+    response keys each card by refs.tcgplayerId and exposes 'tcgplayer' and
+    'ebay' marketplaces with full condition tiers (NEAR_MINT, LIGHTLY_PLAYED,
+    graded, etc.). Verified working against base1-1 (tcgplayer_id 42346).
+
+    only_tcgplayer_ids: optional iterable of tcgplayer_id values to restrict
+    the run to (used for small validation samples). When None, all cards with
+    a tcgplayer_id are processed.
+    """
+    print("\n=== Step 1b: PokeTrace US — ALL cards with tcgplayer_id ===")
+
+    rows = conn.execute("""
+        SELECT tcgdex_id, tcgplayer_id FROM cards
+        WHERE tcgplayer_id IS NOT NULL AND tcgplayer_id != ''
+        ORDER BY tcgplayer_id
+    """).fetchall()
+
+    # Multiple cards (e.g. EN reprints) can share one tcgplayer_id, so map
+    # tcgplayer_id -> [tcgdex_id, ...] and fan the prices out to all of them.
+    tcg_to_cards = {}
+    for r in rows:
+        tid = str(r["tcgplayer_id"]).strip()
+        if not tid:
+            continue
+        if only_tcgplayer_ids is not None and tid not in only_tcgplayer_ids:
+            continue
+        tcg_to_cards.setdefault(tid, []).append(r["tcgdex_id"])
+
+    tcg_ids = list(tcg_to_cards.keys())
+    batch_size = 20
+    print(f"  Cards with tcgplayer_id: {sum(len(v) for v in tcg_to_cards.values())} "
+          f"({len(tcg_ids)} unique tcgplayer_ids)")
+    print(f"  Estimated requests: ~{(len(tcg_ids) + batch_size - 1) // batch_size}")
+
+    if dry_run:
+        print("  [DRY RUN] skipping")
+        return 0
+
+    matched = 0
+    price_rows = 0
+
+    for i in range(0, len(tcg_ids), batch_size):
+        if pt_calls >= PT_LIMIT or pt_consecutive_429 >= PT_429_ABORT:
+            print(f"  API limit reached at {pt_calls} calls")
+            break
+
+        batch = tcg_ids[i:i + batch_size]
+        batch_str = ",".join(batch)
+
+        data_us = pt_get("/cards", {"tcgplayer_ids": batch_str, "market": "US"})
+        if data_us and "data" in data_us:
+            for card in data_us["data"]:
+                tcg_id = str(card.get("refs", {}).get("tcgplayerId", "")).strip()
+                tcgdex_ids = tcg_to_cards.get(tcg_id)
+                if not tcgdex_ids:
+                    continue
+                prices = card.get("prices") or {}
+                top_usd = _best_price(prices, "tcgplayer") or _best_price(prices, "ebay")
+                for tcgdex_id in tcgdex_ids:
+                    for marketplace, tiers in prices.items():
+                        if not isinstance(tiers, dict):
+                            continue
+                        for condition, tier in tiers.items():
+                            if not isinstance(tier, dict):
+                                continue
+                            _save_price(conn, tcgdex_id, "poketrace", marketplace,
+                                        condition, "ALL", "USD", tier)
+                            price_rows += 1
+                    if top_usd:
+                        conn.execute(
+                            "UPDATE cards SET top_price_usd = ? WHERE tcgdex_id = ?",
+                            (top_usd, tcgdex_id))
+                    matched += 1
+
+        batch_num = i // batch_size + 1
+        total_batches = (len(tcg_ids) + batch_size - 1) // batch_size
+        if batch_num % 100 == 0 or batch_num == total_batches:
+            conn.commit()
+            print(f"  Progress: {min(i + batch_size, len(tcg_ids))}/{len(tcg_ids)} "
+                  f"unique ids | matched: {matched} | prices: {price_rows} | API: {pt_calls}")
+
+    conn.commit()
+    print(f"  Done: matched {matched} cards | price rows: {price_rows} | API calls: {pt_calls}")
+    return price_rows
 
 
 # ── Step 2: PokeTrace Search — ALL cards WITHOUT cm_id_product ───────
@@ -791,11 +869,15 @@ def main():
 
     t0 = time.time()
 
-    # Step 1: PokeTrace Bulk (all cards with cm_id)
+    # Step 1: PokeTrace Bulk EU (all cards with cm_id)
     if (run_all or args.poketrace_only) and POKETRACE_API_KEY:
         update_poketrace_bulk(conn, dry_run=args.dry_run)
     elif run_all and not POKETRACE_API_KEY:
         print("\n  [SKIP] POKETRACE_API_KEY not set")
+
+    # Step 1b: PokeTrace US (all cards with tcgplayer_id → TCGplayer + eBay)
+    if (run_all or args.poketrace_only) and POKETRACE_API_KEY:
+        update_poketrace_us(conn, dry_run=args.dry_run)
 
     # Step 2: PokeTrace Search (all cards without cm_id)
     if (run_all or args.poketrace_only) and POKETRACE_API_KEY:
