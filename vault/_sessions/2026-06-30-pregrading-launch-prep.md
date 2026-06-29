@@ -47,5 +47,16 @@ played cards (costly direction) + only validated on TAG studio scans, NOT real p
 - **Validation gate:** ≥30 real phone photos before opening to non-admins.
 - **Optional/deferred:** CORS lock /grade to webapp origin (token already protects budget); recall tuning; CardMarket CSV refresh for ~26 EN CSV-only cards; prices_external retention.
 
+## CUTOVER 2026-06-30 — single grade flow (stakeholder-directed)
+Stakeholder hit the nav confusion (two grade entries: legacy Gemini "Grade"/"Quick Condition Check" +
+admin "Quick Pregrading"). Chose to CUT OVER: Quick Pregrading (new wizard → `/grade`) is now the ONLY
+grade entry for ALL users. Changes (webapp commit ced1fe2): removed admin gate in `Pregrade.jsx`; dropped
+the legacy `ConditionCheck` nav duplicate (route kept for deep links); "Detailed Pregrading" is now a
+CLICKABLE grey "Soon" item → `ReportNew` teaser, reworded to concretely sell the FUTURE 3-photo multi-angle
+scan. Backend: prod `.env` `GRADE_BETA_ADMIN_ONLY=1→0` (backed up, api recreated, health 200);
+`GRADE_REQUIRE_BASE44=1` kept (auth + per-tier limits intact). webapp build green. ⚠️ Non-admins can now
+grade in prod — the ≥30-real-phone-photo confidence check is still open, but the new grader beats the old
+Gemini it replaced.
+
 ## Handoff / next action
 Balance is topped up → run **D1/D2** (golden regression on 100 cards + detector variants). Then **F** (privacy/terms + final QA + Base44 publish). Stakeholder still needs to click **Publish on Base44** to surface the merged frontend (Quick Pregrading + crops + lightbox + copy purge). See memory [[project_pregrading_integration]], [[project_pricing_sourcing_strategy]], [[reference_base44_app_and_credits]], context-pack [[claude-grader-experiments]].
