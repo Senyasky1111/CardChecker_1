@@ -20,6 +20,15 @@
 
 set -euo pipefail
 
+# ── DEPRECATED for routine code deploys ──────────────────────
+# './deploy.sh deploy' clobbers the whole project and dies if the SSH session drops
+# mid-build. Use the robust code-only script instead (detached build, rollback, smoke).
+if [[ "${1:-}" == "deploy" ]]; then
+  echo "deploy.sh deploy is deprecated. Use:  ./scripts/deploy_prod.sh"
+  echo "(code-only deploy, survives SSH drops, captures a rollback tag)"
+  exit 1
+fi
+
 # ── Configuration ────────────────────────────────────────────
 SERVER_NAME="cardcheck-api"
 SERVER_TYPE="ccx23"          # 4 vCPU, 16GB RAM, x86 (€15.29/mo)
