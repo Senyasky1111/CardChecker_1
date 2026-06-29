@@ -1589,9 +1589,10 @@ async def grade_card_endpoint(
     # Quota check BEFORE spending money.
     if base44_user is not None:
         from src import base44_auth
-        wk, mo = await run_in_threadpool(base44_auth.grade_counts, bearer, user_id)   # 503 if unavailable
-        if not base44_auth.within_limit(base44_user.get("subscription_tier"), wk, mo):
-            raise HTTPException(status_code=402, detail="No grade credits remaining")
+        if base44_user.get("role") != "admin":            # admins are unmetered (internal testing)
+            wk, mo = await run_in_threadpool(base44_auth.grade_counts, bearer, user_id)   # 503 if unavailable
+            if not base44_auth.within_limit(base44_user.get("subscription_tier"), wk, mo):
+                raise HTTPException(status_code=402, detail="No grade credits remaining")
         grade_gate.daily_reserve()        # global cost circuit-breaker (429 if hit)
         reserved_local = False
     else:

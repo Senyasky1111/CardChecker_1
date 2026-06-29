@@ -138,6 +138,7 @@ def test_base44_happy_path_charges_after_success(b44_wired, wired):
 
 
 def test_base44_over_limit_returns_402_no_spend(b44_wired, wired):
+    b44_wired["user"] = {"email": "u@x.com", "role": "user", "subscription_tier": "plus"}  # non-admin (admins are unmetered)
     b44_wired["counts"] = (50, 50)       # plus month limit is 50 -> over
     with pytest.raises(HTTPException) as e:
         _call(_upload("f.png", _png()), _upload("b.png", _png()), authorization="Bearer tok")

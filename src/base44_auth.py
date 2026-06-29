@@ -90,8 +90,11 @@ def grade_counts(token: str, email: str) -> tuple[int, int]:
     if isinstance(rows, dict):                      # some shapes wrap in {"items"/"data": [...]}
         rows = rows.get("items") or rows.get("data") or rows.get("entities") or []
     now = _dt.datetime.now(_dt.timezone.utc)
-    week_start = now - _dt.timedelta(days=7)
-    month_start = now - _dt.timedelta(days=30)
+    # match the webapp EXACTLY (useSubscription.jsx): calendar week (Monday 00:00) + month (1st 00:00),
+    # NOT a rolling 7/30-day window — otherwise last week's grades wrongly count and the user is
+    # blocked while the app shows credits left.
+    week_start = (now - _dt.timedelta(days=now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
+    month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     wk = mo = 0
     for t in rows:
         if t.get("reason") != GRADE_REASON:
