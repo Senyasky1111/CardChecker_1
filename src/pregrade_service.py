@@ -120,15 +120,21 @@ def _heavy(detections: dict, side: str) -> list[str]:
 def _whitening_cap(n_mod: int, n_heavy: int):
     """Graded one-way ceiling from detected whitening — PSA-style 'the weak spots set the
     ceiling'. n_mod = MODERATE+ zone count, n_heavy = HEAVY zone count (MINOR excluded upstream).
-    Returns a cap grade, or None when nothing forces a ceiling. Only ever LOWERS a side grade."""
-    if n_heavy >= 2 or n_mod >= 4:
+    Returns a cap grade, or None when nothing forces a ceiling. Only ever LOWERS a side grade.
+
+    HEAVY-DRIVEN thresholds (tuned 2026-06-30 on the 95-card golden regression,
+    scripts/grade_regression_95.py). The old table capped on a SINGLE MODERATE zone (1→9, 2→7),
+    which the holo/foil-front detector over-flag turned into a systematic drag on good cards
+    (the Charizard/Vaporeon complaint: gem/NM cards dragged down). Removing the 1–3 MODERATE
+    caps fixed it — gem under-cap 5→3, NM MAE 0.63→0.37, decision accuracy 77%→80% — while
+    keeping a real safety net: 4+ MODERATE zones (genuine all-around whitening) still caps at 7,
+    and any HEAVY still caps (6 for one, 5 for two). MODERATE on 1–3 zones no longer caps."""
+    if n_heavy >= 2:
         return 5.0
     if n_heavy >= 1:
         return 6.0
-    if n_mod >= 2:
+    if n_mod >= 4:
         return 7.0
-    if n_mod >= 1:
-        return 9.0
     return None
 
 

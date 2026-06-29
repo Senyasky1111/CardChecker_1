@@ -38,11 +38,12 @@ def test_side_block_uses_detector_not_model_worn_zones():
 
 def test_whitening_cap_graded_and_one_way():
     from src.pregrade_service import _whitening_cap, _apply_cap
-    # graded ceilings from MODERATE+ / HEAVY counts
+    # HEAVY-driven ceilings (tuned 2026-06-30 on the 95-card golden regression). 1-3 MODERATE
+    # zones no longer cap (was over-flagging holo/foil fronts); 4+ MODERATE or any HEAVY does.
     assert _whitening_cap(0, 0) is None          # clean -> no ceiling
-    assert _whitening_cap(1, 0) == 9.0           # 1 MODERATE+ -> max 9
-    assert _whitening_cap(2, 0) == 7.0           # 2 -> max 7
-    assert _whitening_cap(4, 0) == 5.0           # 4 -> max 5
+    assert _whitening_cap(1, 0) is None          # 1 MODERATE -> no cap (holo over-flag defense)
+    assert _whitening_cap(3, 0) is None          # 3 MODERATE -> still no cap
+    assert _whitening_cap(4, 0) == 7.0           # 4+ MODERATE (all-around whitening) -> max 7
     assert _whitening_cap(1, 1) == 6.0           # 1 HEAVY -> max 6
     assert _whitening_cap(2, 2) == 5.0           # 2 HEAVY -> max 5
     # one-way: only lowers, never raises; passthrough on None
