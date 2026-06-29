@@ -137,7 +137,8 @@ def test_base44_happy_path_charges_after_success(b44_wired, wired):
     assert b44_wired["charges"] == 1     # Base44 charged exactly once, after success
 
 
-def test_base44_over_limit_returns_402_no_spend(b44_wired, wired):
+def test_base44_over_limit_returns_402_no_spend(b44_wired, wired, monkeypatch):
+    monkeypatch.setenv("GRADE_BETA_ADMIN_ONLY", "0")   # post-beta: non-admins can grade + are metered
     b44_wired["user"] = {"email": "u@x.com", "role": "user", "subscription_tier": "plus"}  # non-admin (admins are unmetered)
     b44_wired["counts"] = (50, 50)       # plus month limit is 50 -> over
     with pytest.raises(HTTPException) as e:
