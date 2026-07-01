@@ -994,6 +994,48 @@ async def get_card_prices(tcgdex_id: str):
         elif mp == "ebay":
             ebay.setdefault(cond.lower(), price_data)
 
+    # --- CardMarket average sanity -------------------------------------------
+    # The NM/Mint display block must show the real CardMarket PRICE GUIDE
+    # (sold/trend averages), NOT the mean of unsold LISTING asks. The
+    # 'cardmarket_unsold' rows are seller ASKS — skewed hard by a few overpriced
+    # listings — and were leaking into near_mint/mint avg/avg_7d/avg_30d,
+    # producing absurd figures (e.g. a €28 card showing "30d avg €305"). We keep
+    # the lowest ask as the "low" quote, but rebuild avg/avg_7d/avg_30d from the
+    # AGGREGATED price-guide row. If no guide row exists, we DROP the averages
+    # rather than surface ask-means as a market average.
+    def _parse_trend(v):
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return None
+
+    guide = None
+    for p in prices:  # freshest-first (same ORDER BY as above)
+        if (p["marketplace"] == "cardmarket" and p["condition"] == "AGGREGATED"
+                and p["country"] == "ALL"):
+            g = {"avg": p["price_avg"], "avg_7d": p["avg_7d"],
+                 "avg_30d": p["avg_30d"], "trend": _parse_trend(p["price_trend"])}
+            if guide is None:
+                guide = g
+            else:  # fill gaps across rows (e.g. poketrace lacks trend, CSV has it)
+                for k, v in g.items():
+                    if guide.get(k) in (None, "") and v not in (None, ""):
+                        guide[k] = v
+
+    for key in ("near_mint", "mint"):
+        obj = cardmarket.get(key)
+        if not obj:
+            continue
+        for k in ("avg", "avg_7d", "avg_30d"):
+            gv = guide.get(k) if guide else None
+            if gv is not None:
+                obj[k] = round(gv, 2)
+            else:
+                obj.pop(k, None)
+        # sale_count was the count of unsold listings, not sold comps — its
+        # presence made the guide average read as a "listings" average.
+        obj.pop("sale_count", None)
+
     # Build links
     links = {}
     cm_id = card["cm_id_product"]
