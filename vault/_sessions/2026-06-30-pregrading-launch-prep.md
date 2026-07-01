@@ -58,5 +58,31 @@ scan. Backend: prod `.env` `GRADE_BETA_ADMIN_ONLY=1→0` (backed up, api recreat
 grade in prod — the ≥30-real-phone-photo confidence check is still open, but the new grader beats the old
 Gemini it replaced.
 
+## LAUNCH-HARDENING batch 2026-07-01 (full app gap-analysis → fixes)
+Ran a 2-agent app audit (webapp completeness + vault priorities), reconciled against reality (many vault
+"blockers" already shipped; mobile is dead code, not a launch blocker). Then executed the real remaining
+gaps. **Webapp (committed to main, need Publish):**
+- `81f6a13` — app-root **ErrorBoundary** (no more white-screen on a render crash); `Report.jsx` explicit
+  not-found / load-failed state (was `if(!report) return null` = blank); `Collection` empty-state "Scan your
+  first card" CTA.
+- `1dfade5` — **sell-vs-grade decision CTA in PriceScanner results** (the differentiator was buried in the
+  Pregrade wizard; now a hook under the price deep-links into Quick Pregrading with card context).
+- `d577709` — **Watchlist live current prices** (Option A): resolve each card's market price client-side by
+  name+set search, flag at/below target (green ✓). Backend polling + push alerts remain the follow-up.
+**Backend (DEPLOYED to prod, verified):** `62df9cf` — gated dev/preview HTML routes (`/`,`/scan`,`/detect-test`,
+`/centering-ui`,`/detect`,`/scan_2`) behind `EXPOSE_DEV_UI` (off in prod → now 404); `/static`+`/grade`+`/health` intact.
+
+**Phone-photo detection (#1) — diagnosed, NOT a broad bug.** Tested real files: Vaporeon front/back + Zapdos
+TAG original (`data/tag_raw/C1084927`) all detect PERFECTLY (`bg_quad` conf 0.9, straight full-card warps —
+rendered + verified). The failure in the user's screenshot was a specific PHONE photo (tilted card on a dark
+low-contrast table) that clean scans don't reproduce. Frontend mitigations already shipped (webapp 49dcb09:
+"Reset view" = real re-detect; honest `full_frame` retake banner). Real detector hardening needs the exact
+failing phone-photo file — do NOT blind-tune `detect_outer_quad` and risk the validated TAG path. Tracked in
+ClickUp `86cah3t9w`.
+
+**Non-blockers confirmed:** blob→storage (scanner→collection already uses persistent catalog `api_image_url`,
+not blobs); webapp "fake credits" (model is subscription-tier via Stripe + `amount:0` usage tracking, not a
+purchase exploit).
+
 ## Handoff / next action
 Balance is topped up → run **D1/D2** (golden regression on 100 cards + detector variants). Then **F** (privacy/terms + final QA + Base44 publish). Stakeholder still needs to click **Publish on Base44** to surface the merged frontend (Quick Pregrading + crops + lightbox + copy purge). See memory [[project_pregrading_integration]], [[project_pricing_sourcing_strategy]], [[reference_base44_app_and_credits]], context-pack [[claude-grader-experiments]].
