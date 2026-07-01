@@ -1664,32 +1664,37 @@ async def grade_card_endpoint(
 # Serve the web UI
 STATIC_DIR = Path("./static")
 if STATIC_DIR.exists():
+    # /static stays public — the webapp loads pregrade crops + centering warps from here.
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
-    @app.get("/", include_in_schema=False)
-    async def root():
-        return FileResponse(str(STATIC_DIR / "index.html"))
+    # Dev/preview HTML pages (detect/scan/centering test harnesses). These are internal
+    # tooling, superseded by the webapp — keep them OFF in prod. Set EXPOSE_DEV_UI=1 to
+    # serve them locally.
+    if os.getenv("EXPOSE_DEV_UI") == "1":
+        @app.get("/", include_in_schema=False)
+        async def root():
+            return FileResponse(str(STATIC_DIR / "index.html"))
 
-    @app.get("/detect", include_in_schema=False)
-    async def detect_page():
-        return FileResponse(str(STATIC_DIR / "detect.html"))
+        @app.get("/detect", include_in_schema=False)
+        async def detect_page():
+            return FileResponse(str(STATIC_DIR / "detect.html"))
 
-    @app.get("/centering-ui", include_in_schema=False)
-    async def centering_page():
-        return FileResponse(str(STATIC_DIR / "centering.html"),
-                            headers={"Cache-Control": "no-store, max-age=0"})
+        @app.get("/centering-ui", include_in_schema=False)
+        async def centering_page():
+            return FileResponse(str(STATIC_DIR / "centering.html"),
+                                headers={"Cache-Control": "no-store, max-age=0"})
 
-    @app.get("/scan", include_in_schema=False)
-    async def scan_page():
-        return FileResponse(str(STATIC_DIR / "scan.html"))
+        @app.get("/scan", include_in_schema=False)
+        async def scan_page():
+            return FileResponse(str(STATIC_DIR / "scan.html"))
 
-    @app.get("/detect-test", include_in_schema=False)
-    async def detect_test_page():
-        return FileResponse(str(STATIC_DIR / "detect-test.html"))
+        @app.get("/detect-test", include_in_schema=False)
+        async def detect_test_page():
+            return FileResponse(str(STATIC_DIR / "detect-test.html"))
 
-    @app.get("/scan_2", include_in_schema=False)
-    async def scan_2_page():
-        return FileResponse(str(STATIC_DIR / "scan_2.html"))
+        @app.get("/scan_2", include_in_schema=False)
+        async def scan_2_page():
+            return FileResponse(str(STATIC_DIR / "scan_2.html"))
 
 
 if __name__ == "__main__":
