@@ -114,7 +114,9 @@ Security verdict: NO exploitable critical (prod is single-worker → rate-limit 
    - `PregradeResult` entity (fields: card_name, set_name, tcgdex_id, front_image_url, back_image_url,
      predicted_grade:num, predicted_bucket, decision, raw_price:num, result_json:text, real_grade:num,
      graded_company, graded_value:num). Without it, My Grades save/read no-op.
-   - `CollectionItem` — add `price_override` (number, nullable).
+   - `CollectionItem` — add `price_override` (number, nullable). [set-your-own-price]
+   - `PortfolioSnapshot` entity (fields: date:string YYYY-MM-DD, total_value:num, card_count:num).
+     [portfolio value-over-time tracker, snapshot-on-visit — commit 5ce70bc]
 2. **Security check:** confirm `User.subscription_tier` is NOT owner-writable (else free users self-grant Pro).
 3. **Test `deleteAccount`** on a throwaway account (step 3 User self-delete API unverified).
 4. **Verify support@cardchecker.app** mailbox exists.
