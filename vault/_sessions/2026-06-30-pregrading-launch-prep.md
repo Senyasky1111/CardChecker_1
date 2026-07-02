@@ -84,5 +84,41 @@ ClickUp `86cah3t9w`.
 not blobs); webapp "fake credits" (model is subscription-tier via Stripe + `amount:0` usage tracking, not a
 purchase exploit).
 
+## 360 AUDIT + FIX MARATHON 2026-07-01/02 (webapp, all committed to main — pending Base44 Publish)
+Ran a 5-agent 360 audit (UI/design, security-Opus, copy/UX-writing, functionality/flows, product quick-wins).
+Then fixed nearly everything. Webapp commits (all build-green):
+- **Consensus hotfixes** `e67b02b` (Account format-crash for cancelers — a self-inflicted regress), `7c1b4de`
+  (home "Card Grading" card routed to the DEAD legacy Gemini ConditionCheck — 3 agents flagged; → Pregrade;
+  purged YOLO / "Card Found 54%" dev-internals from the scan overlay).
+- **Safety/consistency** `9472b31` (deleteAccount: cancel subs across ALL Stripe customers for the email +
+  paginate the entity wipe — the "sub keeps billing after erasure" risk the user asked about; € not $ in
+  UpgradeModal; restored convertImageToPNG so iPhone HEIC decodes).
+- **Copy/plan** `2052a01` (brand unified CardCheck→**CardChecker** + support@cardchecker.app; removed the fake
+  "10/50 detailed reports" from plans/Terms → "Detailed Pregrading (coming soon)", kept 50/300 grades per the
+  user's B choice; free-tier card reframed "Unlock with a subscription" instead of owned-checkmarks).
+- **Dark-mode** `97c61de` (grade+scan flow) + `7c692f3` (pass 2: Account/Watchlist/Collection + all pastel
+  from-*-50 headers that were rendering as white bars with invisible white-on-white titles).
+- **Quick-wins** `f30ef23` (wired the live Price History chart to the existing /price-history endpoint — was a
+  "Coming Soon" stub even for paying users; PSA10 "~Nx raw" multiplier teaser on every scan, exact € behind Pro).
+- **NEW: My Grades** `43ab8ab` — pregrading history page (new nav item). Saves a `PregradeResult` per grade
+  (card, images, predicted grade, full result_json to re-open the Decision Card); users enter the REAL grade
+  they got (PSA/BGS/CGC + value) → stats: total, % that got a 10, prediction accuracy (within ±1), grading ROI.
+  Also fixed the ignored scanner deep-link (?card&set&tcgdex) in Pregrade.
+- **NEW: price override + share** `4cce835` — set-your-own-price per collection card (price_override, with
+  "your price" tag; totals use it); branded PNG share of the Decision Card via html2canvas (already installed).
+
+Security verdict: NO exploitable critical (prod is single-worker → rate-limit safe; daily cap bounds Anthropic spend).
+
+### ⚠️ HANDOFF — user/Base44 actions (I can't do these from here)
+1. **Base44 console — create/extend entities** for the new features to persist:
+   - `PregradeResult` entity (fields: card_name, set_name, tcgdex_id, front_image_url, back_image_url,
+     predicted_grade:num, predicted_bucket, decision, raw_price:num, result_json:text, real_grade:num,
+     graded_company, graded_value:num). Without it, My Grades save/read no-op.
+   - `CollectionItem` — add `price_override` (number, nullable).
+2. **Security check:** confirm `User.subscription_tier` is NOT owner-writable (else free users self-grant Pro).
+3. **Test `deleteAccount`** on a throwaway account (step 3 User self-delete API unverified).
+4. **Verify support@cardchecker.app** mailbox exists.
+5. **Publish on Base44** to surface this entire session's frontend work.
+
 ## Handoff / next action
 Balance is topped up → run **D1/D2** (golden regression on 100 cards + detector variants). Then **F** (privacy/terms + final QA + Base44 publish). Stakeholder still needs to click **Publish on Base44** to surface the merged frontend (Quick Pregrading + crops + lightbox + copy purge). See memory [[project_pregrading_integration]], [[project_pricing_sourcing_strategy]], [[reference_base44_app_and_credits]], context-pack [[claude-grader-experiments]].
