@@ -2,7 +2,7 @@
 Card detection and perspective correction for Pokemon cards.
 
 Detects a card quadrilateral in a photo and warps it to a canonical
-top-down view (600x825 px, matching the 63x88 mm card ratio).
+top-down view (1000x1394 px, matching the 63x88 mm card ratio).
 
 Detection backends:
 - OpenCV (CardDetector): contour + Hough line detection (fast, no model needed)
@@ -21,9 +21,13 @@ import cv2
 import numpy as np
 from PIL import Image
 
-# Canonical output size (matches dataset images & OCR expectations)
-CARD_W = 600
-CARD_H = 825
+# Canonical output size (matches dataset images & OCR expectations).
+# Raised 600->1000 on 2026-07-03: at 600px the collector-number text blurs and
+# OCR misreads it on full-art / JP cards, cascading to wrong CLIP matches.
+# 1000x1394 ~doubles full-art ID accuracy on realistic photos (validated sweep);
+# 1400 overshoots (upscale artifacts). See project_recognition_resolution_bottleneck.
+CARD_W = 1000
+CARD_H = 1394
 CARD_ASPECT = 63 / 88  # width / height ≈ 0.716
 
 
