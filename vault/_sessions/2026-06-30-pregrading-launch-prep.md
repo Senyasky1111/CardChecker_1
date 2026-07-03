@@ -11,6 +11,34 @@ updated: 2026-06-30
 
 TL;DR: Shipped pregrading (Quick Pregrading) to closed beta, iterated heavily on live stakeholder feedback (grading logic overhaul + 16 corner/edge crops + zoom lightbox + UX), fixed the credit-window bug, overhauled price coverage (US market 8%→88% EN), hardened deploy, verified billing. Remaining for public launch: grade accuracy validation (D1/D2, balance now topped up) + privacy/terms + final QA + Base44 publish.
 
+---
+## 🟢 NEXT SESSION — START HERE (handoff 2026-07-03)
+A huge multi-day session ran a 360 audit + shipped dozens of fixes/features + fixed a prod DB-corruption
+incident. ALL my code is committed+pushed (backend `70526a1`, webapp `058062b`). Backend fixes are LIVE;
+webapp fixes are on `main` but NOT visible until the stakeholder clicks **Publish on Base44**.
+
+**IMMEDIATE TASK for the new session (Base44 MCP will work interactively — it did NOT in the prior
+non-interactive session):**
+1. **Grant Pro to `amotrychenko@gmail.com`** — set `subscription_tier = "pro"` on that User entity record
+   via Base44 MCP (`update_entities`). The app id is `68ea74b77adcd0f5e1c2008e`. The Base44 "Users" admin
+   view only shows Name/Role/Email (no tier field) — so this must be done via the entity API/MCP, not that
+   screen. Users seen: senyasky1111 (admin/owner), arsenii.motrychenko (admin), amotrychenko (user ← make
+   pro), guhan1, tyshkan0409 (users). Tier values the code expects: `free`/`plus`/`pro`.
+
+**USER must also do (can't be done from code):**
+2. **Publish on Base44** — surfaces the whole session's frontend work (dark-mode, My Grades, portfolio,
+   price fixes, reset-view, decision CTA, share, etc.). Until then the live app shows OLD behavior.
+3. **Create/extend Base44 entities** (else the new features no-op on save): `PregradeResult` (My Grades),
+   `CollectionItem.price_override` field (set-your-own-price), `PortfolioSnapshot` (portfolio tracker).
+   Exact fields are in the "360 AUDIT" + "portfolio" sections below.
+4. **Security checks:** confirm `User.subscription_tier` is NOT owner-writable (else users self-grant Pro);
+   test `deleteAccount` on a throwaway account; verify `support@cardchecker.app` mailbox exists.
+
+**Still OPEN (backend, my side, when asked):** phone-photo card detection on tilted/dark shots (#1, needs a
+real failing phone photo); the ~€1.5 PokeTrace-vs-CardMarket price gap (aggregator sampling, by-design).
+
+---
+
 ## What's DONE (deployed to prod `bees.cardchecker.app`, rebuilds #1–#9 + pricing rebuild)
 
 **Pregrading `/grade` — LIVE (closed beta, admin-only).** Backend branch `feature/pregrading-grade-endpoint` (pushed, NOT merged to main — origin/main lacks the grade commits). Key pieces:
