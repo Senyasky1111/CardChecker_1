@@ -189,11 +189,20 @@ _MIGRATIONS: list[tuple[str, bool]] = [
 
 
 def get_connection(db_path: str | Path | None = None) -> sqlite3.Connection:
-    """Get a database connection with WAL mode and row_factory."""
+    """Get a database connection with rollback-journal mode and row_factory.
+
+    Uses journal_mode=DELETE (rollback), NOT WAL. In prod the api and price-updater run
+    in SEPARATE containers that bind-mount only the single cards.db file (not its -wal/-shm
+    sidecars), so WAL's shared-memory index isn't shared between them → the reader's cached
+    view corrupts on the writer's checkpoints ("database disk image is malformed" on
+    /identify-v2). Rollback mode coordinates via POSIX locks on the shared inode instead,
+    which DO work across the bind mount. busy_timeout makes readers wait for the (batched)
+    writer's lock rather than error. (grade_credits.db is single-container → keeps WAL.)
+    """
     path = str(db_path or DB_PATH)
     conn = sqlite3.connect(path, timeout=30)  # Wait up to 30s for locks
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA journal_mode=DELETE")
     conn.execute("PRAGMA foreign_keys=ON")
     conn.execute("PRAGMA busy_timeout=30000")  # 30s busy timeout
     return conn
