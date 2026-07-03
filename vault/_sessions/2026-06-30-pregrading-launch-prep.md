@@ -122,5 +122,29 @@ Security verdict: NO exploitable critical (prod is single-worker → rate-limit 
 4. **Verify support@cardchecker.app** mailbox exists.
 5. **Publish on Base44** to surface this entire session's frontend work.
 
+## PROD DB INCIDENT + DURABLE FIX 2026-07-03 (cards.db corruption)
+Scanner "couldn't identify" + price-update crashing → root cause: **cards.db corruption** in the
+`prices_external` table. WHY: WAL journal mode + the api and price-updater running in SEPARATE containers
+that bind-mounted only the single `cards.db` FILE (not its `-wal`/`-shm` sidecars) → each container had its
+own sidecars → the reader's shared-memory view desynced on the writer's checkpoints → `sqlite3.DatabaseError:
+database disk image is malformed` (quick_check showed btree corruption: "child page depth differs", "2nd
+reference to page"). Only `prices_external` was corrupt; catalog (cards 48497, sets, prices, card_external_ids)
+intact.
+**FIX (all deployed):**
+1. **Rebuilt the DB** (`scratchpad/rebuild_db.py`): copied the 7 good tables into a fresh file, recreated
+   `prices_external` EMPTY (regenerable daily). 1.4GB→42MB (dropped 4.8M corrupt price rows). Backups on prod:
+   `data/cards.db.corrupt.20260703`, `.corrupt2`.
+2. **Journal/mount fix — took two tries:** first switched WAL→DELETE (`src/db.py`) — killed corruption but
+   serialised access so hard the api crashed on startup ("database is locked") while the updater wrote. Real
+   fix: **back to WAL + share the sidecars** by mounting the whole `./data` DIR (not individual files) into
+   BOTH containers (`docker-compose.yml`) → -wal/-shm live on one shared mount → WAL concurrency restored, no
+   corruption. PROVEN: a full price-update ran end-to-end (all 6 steps, 50s) WHILE the api stayed healthy — no
+   locked, no malformed.
+3. **Belt-and-suspenders:** `_retry_locked` around `_save_price` + all commits in `update_prices_daily.py`;
+   added `scripts/` to `deploy_prod.sh`'s tar (it only shipped `src/` before, so updater code never deployed).
+**Also fixed:** the scan headline price (€8.80) — PriceScanner mapped `price_avg_30d` from the stale identify
+`price_trend`; headline now uses the fresh /prices 30-day average (webapp `74025ba`). NOTE the ~€1.5 gap vs
+CardMarket's own page is the PokeTrace-aggregator-vs-CM sampling difference (by design), not a bug.
+
 ## Handoff / next action
 Balance is topped up → run **D1/D2** (golden regression on 100 cards + detector variants). Then **F** (privacy/terms + final QA + Base44 publish). Stakeholder still needs to click **Publish on Base44** to surface the merged frontend (Quick Pregrading + crops + lightbox + copy purge). See memory [[project_pregrading_integration]], [[project_pricing_sourcing_strategy]], [[reference_base44_app_and_credits]], context-pack [[claude-grader-experiments]].
