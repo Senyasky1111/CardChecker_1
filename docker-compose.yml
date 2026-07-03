@@ -12,14 +12,11 @@ services:
     environment:
       - PYTHONUNBUFFERED=1
     volumes:
-      # Persist data so price updates survive container restarts
-      - ./data/cardmarket/cards_with_prices.json:/app/data/cardmarket/cards_with_prices.json
-      - ./data/cardmarket/price_guide.json:/app/data/cardmarket/price_guide.json
-      # SQLite card database — WAL mode. The -wal/-shm sidecars MUST be shared with the
-      # price-updater container too, or WAL's shared-memory index desyncs → db corruption.
-      - ./data/cards.db:/app/data/cards.db
-      - ./data/cards.db-wal:/app/data/cards.db-wal
-      - ./data/cards.db-shm:/app/data/cards.db-shm
+      # Mount the whole data dir (not individual files) so cards.db AND its transient WAL
+      # -wal/-shm sidecars live on ONE shared mount visible to both the api and
+      # price-updater containers. Sharing the sidecars is what WAL needs to avoid the
+      # cross-container "database disk image is malformed" corruption.
+      - ./data:/app/data
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 30s
@@ -40,12 +37,8 @@ services:
     environment:
       - PYTHONUNBUFFERED=1
     volumes:
-      # Share cards.db AND its WAL sidecars with the api container (see api service note).
-      - ./data/cards.db:/app/data/cards.db
-      - ./data/cards.db-wal:/app/data/cards.db-wal
-      - ./data/cards.db-shm:/app/data/cards.db-shm
-      - ./data/cardmarket/cards_with_prices.json:/app/data/cardmarket/cards_with_prices.json
-      - ./data/cardmarket/price_guide.json:/app/data/cardmarket/price_guide.json
+      # Same shared data dir as the api (WAL sidecars must be shared — see api service).
+      - ./data:/app/data
     entrypoint: ["bash", "-c"]
     command:
       - |
