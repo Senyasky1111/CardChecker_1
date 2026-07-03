@@ -32,7 +32,7 @@ echo ">> [1/5] Pre-flight: tests must be green"
 
 echo ">> [2/5] Tar code (src + requirements + Dockerfile + compose only — no data/.env)"
 tar czf /tmp/cc_deploy.tar.gz --exclude='__pycache__' --exclude='*.pyc' \
-  src/ requirements.txt Dockerfile docker-compose.yml
+  src/ scripts/ requirements.txt Dockerfile docker-compose.yml
 scp -o BatchMode=yes /tmp/cc_deploy.tar.gz "$HOST:/tmp/"
 
 echo ">> [3/5] Extract + snapshot rollback tag + start DETACHED build"

@@ -201,10 +201,10 @@ def update_poketrace_bulk(conn, dry_run=False):
         batch_num = i // batch_size + 1
         total_batches = (len(cm_ids) + batch_size - 1) // batch_size
         if batch_num % 100 == 0 or batch_num == total_batches:
-            conn.commit()
+            _retry_locked(conn.commit)
             print(f"  Progress: {min(i + batch_size, len(cm_ids))}/{len(cm_ids)} | matched: {matched} | prices: {price_rows} | API: {pt_calls}")
 
-    conn.commit()
+    _retry_locked(conn.commit)
     print(f"  Done: matched {matched}/{len(all_cards)} | price rows: {price_rows} | API calls: {pt_calls}")
 
 
@@ -290,11 +290,11 @@ def update_poketrace_us(conn, dry_run=False, only_tcgplayer_ids=None):
         batch_num = i // batch_size + 1
         total_batches = (len(tcg_ids) + batch_size - 1) // batch_size
         if batch_num % 100 == 0 or batch_num == total_batches:
-            conn.commit()
+            _retry_locked(conn.commit)
             print(f"  Progress: {min(i + batch_size, len(tcg_ids))}/{len(tcg_ids)} "
                   f"unique ids | matched: {matched} | prices: {price_rows} | API: {pt_calls}")
 
-    conn.commit()
+    _retry_locked(conn.commit)
     print(f"  Done: matched {matched} cards | price rows: {price_rows} | API calls: {pt_calls}")
     return price_rows
 
@@ -389,10 +389,10 @@ def update_poketrace_search(conn, dry_run=False):
         matched += 1
 
         if (idx + 1) % 200 == 0:
-            conn.commit()
+            _retry_locked(conn.commit)
             print(f"  Progress: {idx + 1}/{len(cards)} | matched: {matched} | new CM IDs: {new_cm_ids} | API: {pt_calls}")
 
-    conn.commit()
+    _retry_locked(conn.commit)
     print(f"  Done: matched {matched}/{len(cards)} | price rows: {price_rows} | new CM IDs: {new_cm_ids}")
 
 
@@ -525,9 +525,9 @@ def update_pokemon_api(conn, dry_run=False):
 
             total_matched += 1
 
-        conn.commit()
+        _retry_locked(conn.commit)
 
-    conn.commit()
+    _retry_locked(conn.commit)
     print(f"  Done: matched {total_matched} | price rows: {total_prices} | API calls: {pa_calls}")
 
 
@@ -620,15 +620,30 @@ def update_from_csv(conn, dry_run=False):
 
         updated += 1
 
-    conn.commit()
+    _retry_locked(conn.commit)
     print(f"  Updated: {updated} cards from CSV")
 
 
 # ── Helpers ──────────────────────────────────────────────────────────
 
+def _retry_locked(fn, tries=12):
+    """Run fn(), retrying on a transient 'database is locked'. In prod the api (reader)
+    and this updater (writer) share cards.db across containers in rollback-journal mode,
+    so an occasional read lock can briefly block a write — retry instead of crashing the
+    whole run. Re-raises non-lock errors and the final failure."""
+    for attempt in range(tries):
+        try:
+            return fn()
+        except Exception as e:
+            if "database is locked" in str(e).lower() and attempt < tries - 1:
+                time.sleep(0.4 * (attempt + 1))
+                continue
+            raise
+
+
 def _save_price(conn, tcgdex_id, source, marketplace, condition, country, currency, tier):
-    """Insert/replace a single price row."""
-    conn.execute("""
+    """Insert/replace a single price row (retries on transient lock)."""
+    _retry_locked(lambda: conn.execute("""
         INSERT OR REPLACE INTO prices_external
         (tcgdex_id, source, marketplace, condition, country, currency,
          price_avg, price_low, price_high, price_trend,
@@ -645,7 +660,7 @@ def _save_price(conn, tcgdex_id, source, marketplace, condition, country, curren
         tier.get("avg1d"), tier.get("avg7d"), tier.get("avg30d"),
         tier.get("saleCount"), tier.get("confidence", ""),
         TODAY, NOW,
-    ))
+    )))
 
 
 def _best_price(prices, marketplace):
@@ -720,7 +735,7 @@ def _fix_pricecharting_urls(conn):
                          (new_url, tcgdex_id))
             fixed += 1
 
-    conn.commit()
+    _retry_locked(conn.commit)
     print(f"  Fixed {fixed}/{len(rows)} PriceCharting URLs")
 
 
@@ -844,10 +859,10 @@ def update_price_history(conn, dry_run=False, max_cards=1000):
 
         fetched += 1
         if fetched % 50 == 0:
-            conn.commit()
+            _retry_locked(conn.commit)
             print(f"  Progress: {fetched}/{len(cards)} cards, {rows_added} rows added")
 
-    conn.commit()
+    _retry_locked(conn.commit)
     print(f"  Done: {fetched} cards fetched, {rows_added} history rows added")
 
 
@@ -912,7 +927,7 @@ def main():
             INSERT INTO enrichment_runs (phase, started_at, completed_at, cards_processed, status)
             VALUES ('daily_update', ?, ?, ?, 'completed')
         """, (datetime.fromtimestamp(t0, tz=timezone.utc).isoformat(), NOW, pt_calls + pa_calls))
-        conn.commit()
+        _retry_locked(conn.commit)
 
     conn.close()
 
