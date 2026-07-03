@@ -189,20 +189,22 @@ _MIGRATIONS: list[tuple[str, bool]] = [
 
 
 def get_connection(db_path: str | Path | None = None) -> sqlite3.Connection:
-    """Get a database connection with rollback-journal mode and row_factory.
+    """Get a database connection with WAL mode and row_factory.
 
-    Uses journal_mode=DELETE (rollback), NOT WAL. In prod the api and price-updater run
-    in SEPARATE containers that bind-mount only the single cards.db file (not its -wal/-shm
-    sidecars), so WAL's shared-memory index isn't shared between them → the reader's cached
-    view corrupts on the writer's checkpoints ("database disk image is malformed" on
-    /identify-v2). Rollback mode coordinates via POSIX locks on the shared inode instead,
-    which DO work across the bind mount. busy_timeout makes readers wait for the (batched)
-    writer's lock rather than error. (grade_credits.db is single-container → keeps WAL.)
+    WAL lets the api (reader) and price-updater (writer) work concurrently without
+    blocking each other. CRITICAL for the two-container prod setup: the docker-compose
+    bind-mounts cards.db AND its -wal/-shm sidecars into BOTH containers, so WAL's
+    shared-memory index is actually shared between them — without that, the reader's view
+    corrupts on the writer's checkpoints ("database disk image is malformed"). Rollback
+    (DELETE) mode avoids the corruption but serialises access so hard that the api can't
+    even start while the updater writes — hence WAL + shared sidecars is the right combo.
+    busy_timeout is a belt-and-suspenders wait for any brief lock. (grade_credits.db is
+    single-container so its journal mode is independent — see grade_gate.py.)
     """
     path = str(db_path or DB_PATH)
     conn = sqlite3.connect(path, timeout=30)  # Wait up to 30s for locks
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=DELETE")
+    conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
     conn.execute("PRAGMA busy_timeout=30000")  # 30s busy timeout
     return conn
