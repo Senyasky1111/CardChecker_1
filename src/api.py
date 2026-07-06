@@ -902,6 +902,7 @@ class PriceDetail(BaseModel):
     ebay: dict = {}
     graded: dict = {}
     links: dict = {}
+    recent_comps: list = []
     last_updated: str = ""
 
 
@@ -1081,6 +1082,21 @@ async def get_card_prices(tcgdex_id: str):
     if ebay_link:
         links["ebay"] = ebay_link
 
+    # Recent sold comps with clickable eBay links (populated by The Card API ingest).
+    recent_comps = []
+    try:
+        for r in conn.execute(
+            "SELECT title, price, currency, grade, grader, sold_at, listing_url "
+            "FROM ebay_sold_listings WHERE tcgdex_id = ? "
+            "ORDER BY sold_at DESC LIMIT 20", (tcgdex_id,)):
+            recent_comps.append({
+                "title": r["title"], "price": r["price"], "currency": r["currency"],
+                "grade": r["grade"], "grader": r["grader"], "sold_at": r["sold_at"],
+                "url": r["listing_url"],
+            })
+    except Exception:
+        pass  # table absent on older DBs — non-fatal
+
     return PriceDetail(
         tcgdex_id=tcgdex_id,
         name=card["name"] or card["eng_name"] or "",
@@ -1091,6 +1107,7 @@ async def get_card_prices(tcgdex_id: str):
         ebay=ebay,
         graded=graded,
         links=links,
+        recent_comps=recent_comps,
         last_updated=last_updated,
     )
 
