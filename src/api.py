@@ -1036,6 +1036,35 @@ async def get_card_prices(tcgdex_id: str):
         # presence made the guide average read as a "listings" average.
         obj.pop("sale_count", None)
 
+    # --- Fallback: legacy CardMarket `prices` snapshot -----------------------
+    # Modern JP/TW sets aren't in PokeTrace-EU yet and the CSV sweep is EN-only,
+    # so prices_external can be entirely empty for them (~2/3 of JP cards on prod,
+    # concentrated in the Scarlet&Violet era). But the `prices` table (CardMarket
+    # dump keyed by cm_id_product — the SAME source the scan headline shows) still
+    # has the figure. Surface it so the comparison block is never blank and stays
+    # consistent with the scan. Labeled 'cardmarket_csv' (a possibly-stale
+    # snapshot), not a live price guide.
+    if not cardmarket.get("near_mint") and not cardmarket.get("mint") and card["cm_id_product"]:
+        row = conn.execute(
+            "SELECT avg, low, trend, avg7, avg30, updated_at "
+            "FROM prices WHERE cm_id_product = ?",
+            (card["cm_id_product"],),
+        ).fetchone()
+        if row and (row["avg"] or row["low"] or row["trend"]):
+            pd = {
+                "avg": row["avg"] or None,
+                "low": row["low"] or None,
+                "trend": row["trend"] or None,
+                "avg_7d": row["avg7"] or None,
+                "avg_30d": row["avg30"] or None,
+                "currency": "EUR",
+                "date": (row["updated_at"] or "")[:10],
+                "source": "cardmarket_csv",
+            }
+            cardmarket["near_mint"] = {k: v for k, v in pd.items() if v not in (None, 0)}
+            if not last_updated:
+                last_updated = row["updated_at"] or ""
+
     # Build links
     links = {}
     cm_id = card["cm_id_product"]
