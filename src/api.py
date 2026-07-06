@@ -1066,6 +1066,27 @@ async def get_card_prices(tcgdex_id: str):
             if not last_updated:
                 last_updated = row["updated_at"] or ""
 
+    # --- CardMarket "From" — cheapest listing (any condition), daily price guide ------
+    # Distinct from near_mint.low, which is PokeTrace's cheapest NM *ask* (NM-only, and it
+    # lags the live marketplace — that's why it can sit below CardMarket's shown "From").
+    # The price-guide `low` mirrors CardMarket's own "From" figure on the product page: an
+    # any-condition cheapest-listing number, refreshed daily by the guide sweep and
+    # consistent with the scan headline. Surfaced as its own field so the panel can show a
+    # value that matches what the user sees on CardMarket, next to (not merged with) NM low.
+    if card["cm_id_product"]:
+        grow = conn.execute(
+            "SELECT low, updated_at FROM prices WHERE cm_id_product = ?",
+            (card["cm_id_product"],),
+        ).fetchone()
+        if grow and grow["low"]:
+            cardmarket["from"] = {
+                "value": round(grow["low"], 2),
+                "currency": "EUR",
+                "date": (grow["updated_at"] or "")[:10],
+                "source": "cardmarket_guide",
+                "any_condition": True,
+            }
+
     # Build links
     links = {}
     cm_id = card["cm_id_product"]
