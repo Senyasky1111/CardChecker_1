@@ -35,16 +35,24 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
-# tca_pilot_lib lives in scripts/. Make the import work whether this file runs from
-# scripts/ (repo/image) or from the mounted /app/data volume (durable prod cron).
-for _p in (str(Path(__file__).resolve().parent), "/app/scripts"):
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
+# tca_pilot_lib is imported alongside this script. Force THIS file's own dir to the
+# FRONT of sys.path so a matcher fix shipped next to it (durable /app/data mount in
+# prod) wins over the image copy at /app/scripts. NB: Python already puts the script's
+# dir on sys.path, so we must remove+reinsert (a plain "not in" guard would leave
+# /app/scripts ahead of it and silently import the stale image copy).
+_here = str(Path(__file__).resolve().parent)
+if _here in sys.path:
+    sys.path.remove(_here)
+sys.path.insert(0, _here)                 # own dir absolutely first
+if "/app/scripts" not in sys.path:
+    sys.path.append("/app/scripts")       # fallback for the durable prod cron
 import tca_pilot_lib as tca  # match_record, classify, total_price, clean_name, can_disambiguate
 
 ROOT = Path(__file__).resolve().parent.parent
 BASE = "https://www.thecardapi.com/api/v1/market/sales"
-MATCHER_VERSION = "tca-2026-07-06"
+# Bump on ANY matcher change to force a full re-sweep of sales_raw (non-matches are
+# recorded as NULL and never retried under the same version). 07-07: zero-pad bare-number.
+MATCHER_VERSION = "tca-2026-07-07"
 GRADE_PREFIXES = ("PSA_", "BGS_", "CGC_", "SGC_", "ACE_", "TAG_", "PGS_", "AOG_", "EGS_", "CGS_", "GSG_", "PCA_")
 
 
