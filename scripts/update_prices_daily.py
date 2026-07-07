@@ -374,9 +374,12 @@ def update_poketrace_search(conn, dry_run=False):
             enriched_at = ? WHERE tcgdex_id = ?""",
             (top_eur, top_usd, NOW, card["tcgdex_id"]))
 
-        # Fill cm_id_product if found — check for duplicates first
+        # Fill cm_id_product if found — check for duplicates first.
+        # NEVER stamp a CardMarket id on zh-tw cards: TW singles aren't sold on
+        # CardMarket, so PokeTrace's search id points to a different (JP/EN) card.
+        # TW stays on the name-search fallback by design (prices still saved above).
         cm_id = best.get("refs", {}).get("cardmarketId")
-        if cm_id:
+        if cm_id and card["language"] != "zh-tw":
             existing = conn.execute(
                 "SELECT tcgdex_id FROM cards WHERE cm_id_product = ? AND set_id = ? AND language = ?",
                 (cm_id, card["set_id"], card["language"])
