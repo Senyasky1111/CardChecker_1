@@ -44,7 +44,7 @@ services:
       - |
         apt-get update && apt-get install -y --no-install-recommends cron && rm -rf /var/lib/apt/lists/*
         printenv | grep -E '^(POKETRACE_|POKEMON_API_|GEMINI_)' >> /etc/environment
-        printf '0 4 * * * cd /app && /usr/local/bin/python /app/data/thecardapi_sold.py run --budget 40000 --sales-db /app/data/sales.db --cards-db /app/data/cards.db >> /proc/1/fd/1 2>&1\n0 5 * * * cd /app && /usr/local/bin/python /app/data/refresh_cardmarket_priceguide.py --db /app/data/cards.db >> /proc/1/fd/1 2>&1\n0 6 * * * cd /app && /usr/local/bin/python scripts/update_prices_daily.py >> /proc/1/fd/1 2>&1\n' | crontab -
+        printf '0 4 * * * cd /app && /usr/local/bin/python /app/data/thecardapi_sold.py run --budget 48000 --sales-db /app/data/sales.db --cards-db /app/data/cards.db >> /proc/1/fd/1 2>&1\n0 5 * * * cd /app && /usr/local/bin/python /app/data/refresh_cardmarket_priceguide.py --db /app/data/cards.db >> /proc/1/fd/1 2>&1\n0 6 * * * cd /app && /usr/local/bin/python scripts/update_prices_daily.py >> /proc/1/fd/1 2>&1\n' | crontab -
         echo "Cron scheduled: The Card API sold-comps 04:00 + CardMarket refresh 05:00 + PokeTrace update 06:00 UTC"
         cron -f
     deploy:
