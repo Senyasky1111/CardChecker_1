@@ -234,16 +234,46 @@ def match(sales_db: str, cards_db: str) -> int:
 
 
 # ── aggregate ────────────────────────────────────────────────────────
+# Data-quality guards for the per-card / per-grade median. Without these,
+# thin-n buckets produce absurd medians (e.g. a graded slab sold WITHOUT its
+# grade fields lands in the raw NEAR_MINT bucket -> "$19,950 raw" on n=2).
+LOW_N = 3            # >= this many sales -> median is robust to one bad (mismatched) sale
+PAIR_SPREAD = 3.0    # n==2 kept only if the two sales agree within this ratio (else 1 is a mismatch)
+SOLO_CEILING = 150.0 # n==1 kept only below this: a lone LOW-value sale is low-risk & high-coverage,
+                     # a lone HIGH-value sale is the classic mismatch that must wait for corroboration
+MIN_PRICE = 1.50     # drop bulk-lot / junk sales below this (matches the ingest floor)
+
+
+def _bucket_ok(prices: list) -> bool:
+    """Is this (card,bucket)'s median trustworthy? Absurd medians come from
+    mismatched sales polluting a thin bucket (e.g. a graded slab sold without
+    its grade fields lands in raw at $39,500). Guard on spread, not just count."""
+    n = len(prices)
+    if n >= LOW_N:
+        return True                       # median shrugs off a single outlier
+    if n == 2:
+        return max(prices) <= PAIR_SPREAD * min(prices)   # the two sales must agree
+    return prices[0] <= SOLO_CEILING      # n==1: keep only low-value lone sales
+
+
+def _norm_grade(grade) -> str:
+    """Canonicalize a grade so '10' and '10.0' share ONE bucket (else CGC_10 vs
+    CGC_10_0 split the same slabs into two half-populated buckets)."""
+    try:
+        f = float(grade)
+        return str(int(f)) if f == int(f) else str(f).replace(".", "_")
+    except (TypeError, ValueError):
+        return str(grade).replace(".", "_")
+
+
 def _bucket(grade, grader) -> str:
     if grade and grader:
-        return f"{str(grader).upper()}_{str(grade).replace('.', '_')}"
+        return f"{str(grader).upper()}_{_norm_grade(grade)}"
     return "NEAR_MINT"  # raw sale
 
 
-def aggregate(sales_db: str, cards_db: str) -> None:
+def aggregate(sales_db: str, cards_db: str, dry_run: bool = False) -> None:
     scon = sqlite3.connect(sales_db); scon.row_factory = sqlite3.Row
-    ccon = sqlite3.connect(cards_db); ccon.row_factory = sqlite3.Row
-    ccon.execute("PRAGMA busy_timeout=15000")
     rows = scon.execute("""
         SELECT m.tcgdex_id, r.grade, r.grader, r.price, r.title, r.listing_url, r.sale_date, r.sale_uid
         FROM sales_match m JOIN sales_raw r ON r.sale_uid=m.sale_uid
@@ -253,37 +283,77 @@ def aggregate(sales_db: str, cards_db: str) -> None:
     from collections import defaultdict
     groups: dict[tuple, list] = defaultdict(list)
     comps: dict[str, list] = defaultdict(list)
+    n_subfloor = 0
     for r in rows:
+        if r["price"] is None or r["price"] < MIN_PRICE:
+            n_subfloor += 1
+            continue
         b = _bucket(r["grade"], r["grader"])
         groups[(r["tcgdex_id"], b)].append(r["price"])
         comps[r["tcgdex_id"]].append(r)
 
+    # Median per (card, bucket), skipping thin-n buckets whose median can't be
+    # trusted. price_low/high stay as the raw min/max of the surviving sales.
+    priced: list[tuple] = []          # (tid, bucket, med, low, high, n)
+    n_thin = 0
+    thin_examples: list[tuple] = []   # (tid, bucket, med, n) — for the dry-run report
+    for (tid, bucket), prices in groups.items():
+        if not _bucket_ok(prices):
+            n_thin += 1
+            med = round(statistics.median(prices), 2)
+            if med >= 300:            # only the eye-catching dropped medians are worth showing
+                thin_examples.append((tid, bucket, med, len(prices)))
+            continue
+        priced.append((tid, bucket, round(statistics.median(prices), 2),
+                       round(min(prices), 2), round(max(prices), 2), len(prices)))
+    cards_priced = {p[0] for p in priced}
+
+    if dry_run:
+        thin_examples.sort(key=lambda x: -x[2])
+        top = sorted(priced, key=lambda x: -x[2])[:8]
+        print(f"[DRY] sales in scope: {len(rows)} ({n_subfloor} dropped < ${MIN_PRICE})")
+        print(f"[DRY] buckets: {len(groups)} total -> {len(priced)} kept, {n_thin} skipped (thin/noisy)")
+        print(f"[DRY] cards with >=1 priced bucket: {len(cards_priced)} (was {len(comps)} before guard)")
+        print(f"[DRY] top surviving medians:")
+        for tid, bucket, med, low, high, n in top:
+            print(f"        {tid:<12} {bucket:<10} ${med:<10} [${low}..${high}] n={n}")
+        print(f"[DRY] biggest medians we DROPPED as thin-n (would have been surfaced):")
+        for tid, bucket, med, n in thin_examples[:10]:
+            print(f"        {tid:<12} {bucket:<10} ${med:<10} n={n}  <-- killed")
+        scon.close()
+        return
+
+    ccon = sqlite3.connect(cards_db); ccon.row_factory = sqlite3.Row
+    ccon.execute("PRAGMA busy_timeout=15000")
     today = datetime.now(timezone.utc).isoformat()
     snap = today[:10]
+    # Purge ALL our previous rows first: INSERT OR REPLACE alone can't remove a
+    # bucket the guards now skip, so a prior absurd median would otherwise linger
+    # in an older snapshot and win /prices' freshest-wins. thecardapi carries
+    # current-sold only (no trend history), so keeping just the latest run is fine.
+    ccon.execute("DELETE FROM prices_external WHERE source='thecardapi'")
     n_price = 0
-    for (tid, bucket), prices in groups.items():
-        med = round(statistics.median(prices), 2)
-        marketplace = "ebay"
+    for tid, bucket, med, low, high, n in priced:
         ccon.execute("""
-            INSERT OR REPLACE INTO prices_external
+            INSERT INTO prices_external
             (tcgdex_id, source, marketplace, condition, country, currency,
              price_avg, price_low, price_high, price_trend, avg_1d, avg_7d, avg_30d,
              sale_count, confidence, snapshot_date, updated_at)
-            VALUES (?, 'thecardapi', ?, ?, 'ALL', 'USD', ?, ?, ?, '', NULL, NULL, NULL, ?, 'sold', ?, ?)
-        """, (tid, marketplace, bucket, med, round(min(prices), 2), round(max(prices), 2),
-              len(prices), snap, today))
+            VALUES (?, 'thecardapi', 'ebay', ?, 'ALL', 'USD', ?, ?, ?, '', NULL, NULL, NULL, ?, 'sold', ?, ?)
+        """, (tid, bucket, med, low, high, n, snap, today))
         n_price += 1
 
     # recent comps with links (most recent 20 per card). ebay_sold_listings already
     # exists (src/db.py, "Phase 2"); add a `source` column if missing so we can
-    # replace only our rows without touching any other writer.
+    # replace only our rows without touching any other writer. Only cards that kept
+    # >=1 priced bucket get comps, so the comps never contradict a surfaced median.
     have = {r[1] for r in ccon.execute("PRAGMA table_info(ebay_sold_listings)")}
     if "source" not in have:
         ccon.execute("ALTER TABLE ebay_sold_listings ADD COLUMN source TEXT")
     ccon.execute("DELETE FROM ebay_sold_listings WHERE source='thecardapi'")
     n_comp = 0
-    for tid, rs in comps.items():
-        for r in sorted(rs, key=lambda x: x["sale_date"] or "", reverse=True)[:20]:
+    for tid in cards_priced:
+        for r in sorted(comps[tid], key=lambda x: x["sale_date"] or "", reverse=True)[:20]:
             ccon.execute("INSERT INTO ebay_sold_listings "
                          "(tcgdex_id,listing_url,title,price,currency,condition,grader,grade,sold_at,fetched_at,source) "
                          "VALUES (?,?,?,?,?,?,?,?,?,?, 'thecardapi')",
@@ -291,7 +361,8 @@ def aggregate(sales_db: str, cards_db: str) -> None:
                           _bucket(r["grade"], r["grader"]), r["grader"], r["grade"], r["sale_date"], today))
             n_comp += 1
     ccon.commit()
-    print(f"aggregate done: wrote {n_price} price rows across {len(comps)} cards, {n_comp} recent comps")
+    print(f"aggregate done: wrote {n_price} price rows across {len(cards_priced)} cards, "
+          f"{n_comp} recent comps (dropped {n_thin} thin/noisy buckets, {n_subfloor} sub-${MIN_PRICE} sales)")
     scon.close(); ccon.close()
 
 
@@ -302,13 +373,15 @@ def main() -> None:
     ap.add_argument("--cards-db", default="data/cards.db")
     ap.add_argument("--budget", type=int, default=2000)
     ap.add_argument("--price-min", type=float, default=1.50)
+    ap.add_argument("--dry-run", action="store_true",
+                    help="aggregate only: compute + report guard stats, write nothing")
     a = ap.parse_args()
     if a.cmd in ("ingest", "run"):
         ingest(a.sales_db, a.budget, a.price_min)
     if a.cmd in ("match", "run"):
         match(a.sales_db, a.cards_db)
     if a.cmd in ("aggregate", "run"):
-        aggregate(a.sales_db, a.cards_db)
+        aggregate(a.sales_db, a.cards_db, dry_run=a.dry_run)
 
 
 if __name__ == "__main__":
