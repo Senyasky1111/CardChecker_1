@@ -92,10 +92,19 @@ def card_url(
     Returns:
         CardMarket URL (direct redirect or search).
     """
-    # 1. idProduct redirect — auto-redirects to exact product page.
-    #    cm_id_product is now unique per card (duplicates cleaned), so this
-    #    is the most reliable method. Works for EN cards with a valid product ID.
     lang = card.get("language", "en")
+
+    # 1. Direct product slug — cleanest canonical URL, no redirect/Cloudflare.
+    #    `cm_url_slug` = the path after /Singles/ (e.g. "Battle-Partners/Ns-Klink-sv9064"),
+    #    resolved from the CardMarket product catalog / SERP. Preferred when present
+    #    (esp. JP/TW, where the idProduct redirect historically pointed to the wrong card).
+    slug = (card.get("cm_url_slug") or "").strip().strip("/")
+    if slug:
+        return f"{CM_BASE}/{locale}/Pokemon/Products/Singles/{slug}"
+
+    # 2. idProduct redirect — auto-redirects to exact product page.
+    #    cm_id_product is now unique per card (duplicates cleaned), so this
+    #    is reliable for EN cards with a valid product ID.
     cm_id = card.get("cm_id_product") or card.get("id_product")
     if cm_id and str(cm_id).isdigit():
         return f"{CM_BASE}/{locale}/Pokemon/Products?idProduct={cm_id}"

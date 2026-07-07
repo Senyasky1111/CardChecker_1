@@ -920,7 +920,7 @@ async def get_card_prices(tcgdex_id: str):
     # Get card info
     card = conn.execute("""
         SELECT c.tcgdex_id, c.name, c.eng_name, c.language, c.set_id,
-               c.cm_id_product, c.tcgplayer_id, c.has_graded,
+               c.cm_id_product, c.cm_url_slug, c.tcgplayer_id, c.has_graded,
                c.collector_number, c.pricecharting_url, c.tcgplayer_url,
                s.name as set_name, s.abbreviation
         FROM cards c

@@ -712,6 +712,12 @@ def _fix_pricecharting_urls(conn):
     print(f"\n=== Step 5: Fix PriceCharting URLs ({len(rows)} JP/TW cards) ===")
 
     for tcgdex_id, name, eng_name, lang, set_id, collector_number, old_url in rows:
+        # Preserve resolved DIRECT product URLs — never clobber a /game/ link with
+        # a search URL. Direct PC URLs are filled by pc_links_offline.py /
+        # serper_residual.py and must survive the daily refresh.
+        if "/game/" in (old_url or ""):
+            continue
+
         card_name = (eng_name or name or "").strip()
         if not card_name:
             continue
