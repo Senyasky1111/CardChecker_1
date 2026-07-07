@@ -516,6 +516,7 @@ def _match_to_card(card: dict, locale: str = "en") -> SQLCardMatch:
     # Build CardMarket URL using existing cardmarket_url module
     cm_card = {
         "id_product": cm_id,
+        "cm_url_slug": card.get("cm_url_slug", ""),
         "name": card.get("cm_name") or card.get("name", ""),
         "eng_name": card.get("eng_name", ""),
         "language": card.get("language", "en"),
@@ -1087,11 +1088,26 @@ async def get_card_prices(tcgdex_id: str):
                 "any_condition": True,
             }
 
+    # --- Sanity-clamp condition lows against the guide "From" ------------------------
+    # From (guide `low`) is the cheapest listing of ANY condition, so it is a hard floor:
+    # a NEAR_MINT/MINT `low` below it is impossible for live data. It means the PokeTrace
+    # `cardmarket_unsold` ask is stale or erroneous (a snapshot lagging a price rise, or a
+    # €0.02 "NM" on a €500 card). ~9% of cards hit this. Drop such lows so no consumer ever
+    # shows a cheapest-NM below the any-condition From; lows >= From are kept (real premium).
+    _floor = (cardmarket.get("from") or {}).get("value")
+    if _floor:
+        for _k, _obj in cardmarket.items():
+            if (_k.startswith(("near_mint", "mint")) and isinstance(_obj, dict)
+                    and _obj.get("low") is not None and _obj["low"] < _floor):
+                _obj.pop("low", None)
+
     # Build links
     links = {}
-    cm_id = card["cm_id_product"]
-    if cm_id:
-        links["cardmarket"] = f"https://www.cardmarket.com/en/Pokemon/Products/Singles?idProduct={cm_id}"
+    # Prefer the clean /Singles/{slug} product URL (cm_url_slug), else idProduct
+    # redirect, else name search — all handled by card_url().
+    cm_link = card_url(dict(card))
+    if cm_link:
+        links["cardmarket"] = cm_link
     tcg_id = card["tcgplayer_id"]
     tcg_url = _build_tcgplayer_url(tcg_id, dict(card))
     if tcg_url:
