@@ -189,12 +189,18 @@ def detect_outer_quad(img: np.ndarray) -> "np.ndarray | None":
     if len(approx) == 4:
         a = order_corners(approx.reshape(4, 2).astype(np.float32))
         diag = max(np.linalg.norm(box[0] - box[2]), 1.0)
-        if float(np.max(np.linalg.norm(a - box, axis=1)) / diag) > 0.03:
+        # require the SECOND-most-departed corner to move too, so a single jagged /
+        # rounded / holo corner can't trigger a false perspective warp.
+        if float(np.sort(np.linalg.norm(a - box, axis=1))[-2] / diag) > 0.03:
             quad = a
     if quad is None:
         # 2) already STRAIGHT (axis-aligned & fills bbox) -> plain crop, NO warp/rotation
-        # 3) merely ROTATED -> correct the rotation with the tight rotated rect
-        quad = bbox if (tilt < 1.5 and fill > 0.90) else box
+        # 3) merely ROTATED -> correct with the rotated rect, but ONLY for an UNAMBIGUOUS
+        #    rotation (large tilt AND poorly-filled bbox — a genuinely rotated card shows both).
+        #    Below that, minAreaRect's angle is dominated by mask noise on JP SAR / holo-border
+        #    cards, so a small rotation is more likely WRONG than right; use the zero-rotation
+        #    axis-aligned crop (the outer green edge is draggable). Fixes tilted-card regression.
+        quad = box if (tilt >= 5.0 and fill < 0.85) else bbox
     return quad / sc if sc < 1.0 else quad   # back to full-res coords
 
 
@@ -231,6 +237,40 @@ def rectify_for_centering(image: Image.Image, backend: str = "opencv") -> dict:
         "warped": warped, "W": cw, "H": ch,
         "outer": outer, "corners": corners, "confidence": conf,
         "method": method, "card_found": found,
+    }
+
+
+def rectify_manual(image: Image.Image, corners_px: np.ndarray) -> dict:
+    """Rectify a card from 4 USER-placed corners (manual re-trace) to the SAME hi-res,
+    aspect-exact (0.716) canvas as rectify_for_centering, so the centering UI continues
+    unchanged on a correctly-cropped image.
+
+    corners_px: 4x2 float32 in ORIGINAL-image px, any order (re-ordered geometrically here).
+    Raises ValueError on a degenerate / out-of-bounds / non-convex quad so the API can 422.
+    """
+    img = np.array(image.convert("RGB"))
+    H, W = img.shape[:2]
+    ordered = order_corners(np.asarray(corners_px, dtype=np.float32))
+
+    # --- degenerate / out-of-bounds guards (fail loudly instead of a garbage homography) ---
+    pad = 0.02 * max(W, H)
+    if (ordered[:, 0] < -pad).any() or (ordered[:, 0] > W + pad).any() or \
+       (ordered[:, 1] < -pad).any() or (ordered[:, 1] > H + pad).any():
+        raise ValueError("corner points fall outside the image")
+    quad_i = ordered.reshape(-1, 1, 2).astype(np.int32)
+    if abs(cv2.contourArea(quad_i)) < 0.01 * W * H:
+        raise ValueError("selected quad is too small / degenerate")
+    if not cv2.isContourConvex(quad_i):
+        raise ValueError("selected points are not a convex quad")
+
+    mx, my = round(MARGIN_FRAC * CENTERING_W), round(MARGIN_FRAC * CENTERING_H)
+    warped = warp_card_to(img, ordered, CENTERING_W, CENTERING_H, mx, my)  # reuse auto-path warp
+    cw, ch = CENTERING_W + 2 * mx, CENTERING_H + 2 * my
+    outer = {"left": mx, "top": my, "right": mx + CENTERING_W, "bottom": my + CENTERING_H}
+    return {
+        "warped": warped, "W": cw, "H": ch,
+        "outer": outer, "corners": ordered, "confidence": 1.0,
+        "method": "manual", "card_found": True,
     }
 
 

@@ -32,12 +32,12 @@ from fastapi import FastAPI, File, Form, Header, HTTPException, Query, UploadFil
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
-from PIL import Image
+from PIL import Image, ImageOps
 from pydantic import BaseModel
 
 from src.card_detector import (
     get_detector, visualize_detection,
-    rectify_for_centering, seed_inner_frame, compute_centering,
+    rectify_for_centering, rectify_manual, seed_inner_frame, compute_centering,
 )
 from src.card_matcher import CardMatcher, MatchResult, _normalize_name as _normalize_card_name
 from src.text_index import parse_search_query
@@ -682,6 +682,102 @@ async def centering_endpoint(
         "seed_reliable": seed["reliable"],
         "detect_method": rect["method"],
         "detect_confidence": round(rect["confidence"], 4),
+        # auto-detected quad in ORIGINAL-image px (TL,TR,BR,BL) so the manual re-trace editor
+        # can pre-seed its 4 handles on the detected corners instead of a blind inset rectangle.
+        "src_corners": [[round(float(x), 1), round(float(y), 1)] for x, y in rect["corners"]],
+        "processing_time_ms": round(elapsed_ms, 1),
+    }
+
+
+def _parse_manual_corners(raw: str) -> "tuple[list[list[float]], float | None, float | None]":
+    """Parse the manual re-trace payload into 4 [x,y] corners + optional (img_w, img_h).
+
+    Accepts either the rich `points` object
+        {"corners": {"tl":[x,y],"tr":..,"br":..,"bl":..} | [TL,TR,BR,BL],
+         "edges": {...}, "img_w": W, "img_h": H}
+    or a bare corners list `[[x,y]*4]`. Corner ORDER is advisory — the backend re-orders
+    geometrically — but 4 valid [x,y] points are required.
+    """
+    import json as _json
+    obj = _json.loads(raw)
+    img_w = img_h = None
+    if isinstance(obj, dict) and "corners" in obj:
+        img_w, img_h = obj.get("img_w"), obj.get("img_h")
+        obj = obj["corners"]
+    if isinstance(obj, dict):
+        obj = [obj[k] for k in ("tl", "tr", "br", "bl")]
+    if not isinstance(obj, (list, tuple)) or len(obj) != 4:
+        raise ValueError("expected 4 corner points")
+    corners = [[float(p[0]), float(p[1])] for p in obj]
+    return corners, (float(img_w) if img_w else None), (float(img_h) if img_h else None)
+
+
+@app.post("/centering/manual")
+async def centering_manual_endpoint(
+    file: UploadFile = File(...),
+    points: str = Form(default=None, description="JSON: {corners, edges?, img_w?, img_h?}"),
+    corners: str = Form(default=None, description="JSON: [[x,y]*4] (alias for points.corners)"),
+    side: str = Form(default=None),
+    backend: str = Query(default="opencv"),  # unused; kept for symmetry with /centering
+):
+    """Rectify a card from USER-placed corners (manual re-trace, when auto-detection was wrong).
+
+    The client re-sends the ORIGINAL photo plus the 4 corner points (original-image px) the user
+    dragged. Returns the SAME shape as /centering (detect_method:"manual") so the client reuses
+    its centering render path unchanged. Edge-midpoints are UX-only and do not affect the warp.
+    """
+    if not file.content_type or not file.content_type.startswith("image/"):
+        raise HTTPException(status_code=400, detail="File must be an image")
+    contents = await file.read()
+    if len(contents) > MAX_GRADE_IMAGE_BYTES:
+        raise HTTPException(status_code=413, detail="Image too large (max 15 MB)")
+    try:
+        image = ImageOps.exif_transpose(Image.open(io.BytesIO(contents))).convert("RGB")
+    except Exception:
+        raise HTTPException(status_code=400, detail="File is not a readable image")
+    W, H = image.size
+    if W * H > MAX_GRADE_IMAGE_PIXELS:
+        raise HTTPException(status_code=413, detail="Image resolution too high")
+
+    raw = points if points is not None else corners
+    if not raw:
+        raise HTTPException(status_code=400, detail="points (or corners) is required")
+    try:
+        pts_list, img_w, img_h = _parse_manual_corners(raw)
+    except (ValueError, KeyError, TypeError, IndexError):
+        raise HTTPException(
+            status_code=400,
+            detail="points must be JSON with 4 corners ([[x,y]*4] or {tl,tr,br,bl})",
+        )
+
+    # rescale if the client's coords are relative to a downscaled preview
+    import numpy as np
+    sx = (W / img_w) if img_w else 1.0
+    sy = (H / img_h) if img_h else 1.0
+    pts = np.array([[x * sx, y * sy] for x, y in pts_list], dtype=np.float32)
+
+    t0 = time.time()
+    try:
+        rect = rectify_manual(image, pts)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    seed = seed_inner_frame(rect["warped"], rect["outer"])
+    elapsed_ms = (time.time() - t0) * 1000
+
+    import hashlib
+    fh = hashlib.md5(contents[:1024]).hexdigest()[:8]
+    phash = hashlib.md5(pts.tobytes()).hexdigest()[:6]   # idempotent per point-set
+    warp_name = f"centering_manual_{fh}_{phash}.jpg"
+    rect["warped"].save(f"static/{warp_name}")
+
+    return {
+        "warped_url": f"/static/{warp_name}",
+        "canvas": {"w": rect["W"], "h": rect["H"]},
+        "outer": rect["outer"],
+        "seed": {k: seed[k] for k in ("left", "right", "top", "bottom")},
+        "seed_reliable": seed["reliable"],
+        "detect_method": "manual",
+        "detect_confidence": 1.0,
         "processing_time_ms": round(elapsed_ms, 1),
     }
 
