@@ -38,7 +38,7 @@ BATCH_SIZE = 50
 DELAY_EMPTY = 0.5       # seconds between batches with no cards
 DELAY_WITH_CARDS = 3.0   # seconds between batches that found cards
 REQUEST_TIMEOUT = 15
-MAX_CARD_ID = 18500  # Upper bound: last known card ~18355, plus safety margin
+MAX_CARD_ID = 20000  # Upper bound: live top ~19281 (2026-07 probe), plus safety margin
 
 _rate_limited = False  # Flag to signal 403 detected
 
@@ -288,6 +288,7 @@ def scrape(
     max_id: int = MAX_CARD_ID,
     download_images: bool = False,
     resume: bool = False,
+    skip_existing: bool = False,
 ) -> None:
     """Main scraping loop with concurrent HTTP fetching."""
     progress = _load_progress()
@@ -296,6 +297,17 @@ def scrape(
         print(f"Resuming from ID {start_id} (previously scraped: {progress['scraped_count']})")
 
     conn = ensure_schema()
+
+    # Backfill mode: skip IDs already in the DB (no HTTP), so a full-range
+    # rescan only re-fetches the gaps left by past 403 backoffs.
+    existing_ids: set[int] = set()
+    if skip_existing:
+        for (tid,) in conn.execute("SELECT tcgdex_id FROM cards WHERE tcgdex_id GLOB 'tw-[0-9]*'"):
+            n = tid[3:]
+            if n.isdigit():
+                existing_ids.add(int(n))
+        print(f"  skip-existing: {len(existing_ids)} TW ids already in DB will be skipped")
+
     scraped = progress.get("scraped_count", 0)
     total_ids = max_id - start_id + 1
     total_batches = (total_ids + BATCH_SIZE - 1) // BATCH_SIZE
@@ -312,9 +324,11 @@ def scrape(
         batch_start = start_id + batch_idx * BATCH_SIZE
         batch_end = min(batch_start + BATCH_SIZE, max_id + 1)
         batch_ids = list(range(batch_start, batch_end))
+        if skip_existing:
+            batch_ids = [c for c in batch_ids if c not in existing_ids]
 
         _rate_limited = False
-        results = _fetch_batch(batch_ids, download_images)
+        results = _fetch_batch(batch_ids, download_images) if batch_ids else []
 
         # Handle 403 rate limiting
         if _rate_limited:
@@ -378,6 +392,7 @@ def main():
     parser.add_argument("--max-id", type=int, default=MAX_CARD_ID, help="Max card ID to check")
     parser.add_argument("--resume", action="store_true", help="Resume from last progress")
     parser.add_argument("--download-images", action="store_true", help="Download card images")
+    parser.add_argument("--skip-existing", action="store_true", help="Skip IDs already in DB (backfill gaps only)")
     parser.add_argument("--workers", type=int, default=WORKERS, help="Concurrent HTTP workers")
     args = parser.parse_args()
 
@@ -388,6 +403,7 @@ def main():
         max_id=args.max_id,
         download_images=args.download_images,
         resume=args.resume,
+        skip_existing=args.skip_existing,
     )
 
 

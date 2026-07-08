@@ -133,6 +133,15 @@ def fetch_sets(conn):
 
         card_count = detail.get("cardCount", {})
         serie = detail.get("serie", {})
+
+        # Skip Pokémon TCG Pocket (digital-only) sets — not scannable physical cards.
+        # Filter on serie.id == "tcgp" (NOT a set_id regex, which would wrongly drop
+        # physical promo sets like "mep" / Mega Evolution).
+        serie_id = serie.get("id", "") if isinstance(serie, dict) else ""
+        if serie_id == "tcgp":
+            print(f"  SKIP Pocket set: {set_id}")
+            continue
+
         abbr_data = detail.get("abbreviation", {})
         abbreviation = ""
         if isinstance(abbr_data, dict):
@@ -438,6 +447,14 @@ def print_stats(conn):
 
 
 def main():
+    # Windows consoles default to cp1252 and crash when printing CJK set names
+    # (jp-*/tw-* synthetic sets). Force UTF-8 output; never let a print kill the build.
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
     parser = argparse.ArgumentParser(description="Build card database from TCGdex + CardMarket")
     parser.add_argument("--force", action="store_true", help="Re-fetch all cards")
     parser.add_argument("--prices-only", action="store_true", help="Only update prices")
