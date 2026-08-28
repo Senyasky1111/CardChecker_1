@@ -321,3 +321,17 @@ Set up project-level MCP integration to query Base44 datastore and Stripe direct
 Recommended key: Stripe restricted key (read-only subscriptions/customers/invoices), or test mode key (sk_test_) for dev. NOT sk_live_ secret.
 
 **Net effect for future sessions**: instead of "show me the screenshot", Claude can directly check `User.subscription_tier`, `subscription.cancel_at_period_end`, `current_period_end`, invoice state — and proactively verify state after deploys.
+
+## [2026-08-28] session | Learning roadmap research: AI-агенты/evals + маркетинг + видео для соло-фаундера
+
+Глубокое исследование источников обучения под две цели: запуск AI-стартапов и продажа услуг по AI-автоматизации.
+
+**Артефакт**: [[30-Resources/reference/learning-roadmap-ai-agency-2026]]
+
+**Ключевые выводы**:
+- Технический gap не в «как сделать агента» (это commodity), а в evals/observability/guardrails — единственная дефицитная компетенция, за которую платят.
+- Платная покупка №1: AI Evals for Engineers & PMs (Hamel Husain + Shreya Shankar, Maven, $4 200) — но только после выжимания бесплатного hamel.dev и применения error analysis к CardChecker.
+- Сертификаты на рынке услуг ≈ 0; брать только бесплатные (HF Agents/MCP, Anthropic Academy, n8n L1/L2, DaVinci Resolve). Claude Certification Program закрыт для не-партнёров, OpenAI proctored exam ещё в пилоте.
+- Рынок AI-автоматизации насыщен на generic-уровне, пуст на нишевом. Уникальный ров — vision-автоматизация (CV-компетенция + CardChecker как готовый кейс).
+- Виральность: хук за 1–2 сек, 4-beat spine (Hook→Context→Payoff→Loop), бит каждые 2–4 сек. Сценарий > монтаж.
+- AI-видео 2026: нативное аудио важнее визуала (Kling 3.0 Omni / Seedance 2.0 / Veo 3.1); Sora сворачивает video API — не строить воркфлоу.

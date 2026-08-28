@@ -186,6 +186,7 @@ SORT date DESC
 ## 📚 Reference
 
 - [[30-Resources/reference/obsidian-best-practices-research]] — методология vault'a
+- [[30-Resources/reference/learning-roadmap-ai-agency-2026]] — план обучения соло-фаундера: AI-агенты/evals, маркетинг, видео (2026)
 - `30-Resources/templates/` — 9 шаблонов
 
 ---
