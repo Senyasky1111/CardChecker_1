@@ -1,0 +1,30 @@
+name: Supabase keepalive
+
+# Free-tier Supabase pauses a project after 7 days without API traffic.
+# The native app is in closed testing, so real traffic is sporadic; one
+# authenticated REST call a day keeps the reviewer login alive.
+on:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Query profiles via REST
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+        run: |
+          code=$(curl -s -o /dev/null -w "%{http_code}" \
+            "$SUPABASE_URL/rest/v1/profiles?select=id&limit=1" \
+            -H "apikey: $SUPABASE_ANON_KEY" \
+            -H "Authorization: Bearer $SUPABASE_ANON_KEY")
+          echo "rest responded $code"
+          # 200 (rows) and 401/403 (anon role has no grant on profiles, by
+          # design) both prove Postgres saw the request; only 5xx/no response
+          # is a failure.
+          case "$code" in 2*|401|403) ;; *) exit 1;; esac
+          curl -sf "$SUPABASE_URL/auth/v1/health" -H "apikey: $SUPABASE_ANON_KEY" > /dev/null
+          echo "auth healthy"
